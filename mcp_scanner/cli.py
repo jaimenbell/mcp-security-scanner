@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -18,7 +19,12 @@ from .models import ScanResult
 
 # The operator's real MCP servers. mcp-factory is the known-vulnerable target
 # (codegen-injection class); the other five were audited clean.
-FLEET_ROOT = Path(r"C:\Users\jaime\projects")
+#
+# FLEET_ROOT is intentionally NOT hardcoded — it's read from an env var so
+# this repo carries no personal directory structure. Set it locally, e.g.
+# (PowerShell):  $env:MCP_SCANNER_FLEET_ROOT = "C:\Users\you\projects"
+# (bash):        export MCP_SCANNER_FLEET_ROOT=/path/to/your/projects
+FLEET_ROOT_ENV_VAR = "MCP_SCANNER_FLEET_ROOT"
 FLEET_SERVERS = [
     "mcp-factory",   # KNOWN: codegen-injection surface (should flag)
     "github-mcp",    # clean
@@ -29,8 +35,22 @@ FLEET_SERVERS = [
 ]
 
 
+def get_fleet_root() -> Path:
+    """Resolve the fleet root from the environment. Raises if unset."""
+    raw = os.environ.get(FLEET_ROOT_ENV_VAR)
+    if not raw:
+        raise RuntimeError(
+            f"--self-audit requires the {FLEET_ROOT_ENV_VAR} environment variable "
+            "to point at the directory containing your MCP server repos "
+            f"(e.g. {FLEET_ROOT_ENV_VAR}=/path/to/projects). This var has no "
+            "default so the repo carries no personal path."
+        )
+    return Path(raw)
+
+
 def _self_audit_targets() -> list[Path]:
-    return [FLEET_ROOT / name for name in FLEET_SERVERS]
+    fleet_root = get_fleet_root()
+    return [fleet_root / name for name in FLEET_SERVERS]
 
 
 def run_self_audit(as_json: bool = False) -> list[ScanResult]:
@@ -56,7 +76,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.self_audit:
-        results = run_self_audit()
+        try:
+            results = run_self_audit()
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
         if args.json:
             import json
             print(json.dumps([r.to_dict() for r in results], indent=2))

@@ -31,8 +31,21 @@ Every finding carries **severity** (P0 critical → P3 hardening nit), **confide
 python -m mcp_scanner.cli <path-to-mcp-server>          # markdown report
 python -m mcp_scanner.cli <path> --json                 # JSON
 python -m mcp_scanner.cli <path> --fail-on P1           # CI gate: exit 2 on P0/P1
-python -m mcp_scanner.cli --self-audit                  # scan the fleet's own servers
+python -m mcp_scanner.cli --self-audit                  # scan your own fleet's servers
 ```
+
+`--self-audit` reads the directory to scan from the `MCP_SCANNER_FLEET_ROOT`
+environment variable — there is no baked-in default, so this repo carries no
+personal path. Set it to the directory containing the MCP server repos you
+want audited:
+
+```bash
+export MCP_SCANNER_FLEET_ROOT=/path/to/your/mcp/repos    # bash
+$env:MCP_SCANNER_FLEET_ROOT = "C:\path\to\your\projects"  # PowerShell
+```
+
+Without it set, `--self-audit` exits 1 with a clear error rather than
+silently defaulting anywhere.
 
 Or install the console script:
 
@@ -68,7 +81,12 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 27 tests: per-detector vuln/clean fixtures + the self-audit proof
+python -m pytest -q     # 28 tests: per-detector vuln/clean fixtures + the self-audit proof
 ```
+
+The self-audit tests (7 of the 28) require `MCP_SCANNER_FLEET_ROOT` to be set
+and pointed at real MCP server repos to scan; they skip cleanly if it's
+unset (e.g. in a fresh clone or CI on another machine). See
+[ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.
 
 Each detector ships a matched pair of fixtures — a vulnerable one it must catch, a clean one it must not flag — so the false-positive floor is a tested invariant, not a hope.

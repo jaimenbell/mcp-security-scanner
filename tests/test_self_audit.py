@@ -4,33 +4,54 @@ Requirement from the product spec:
   (a) it flags the mcp-factory codegen-injection class the fleet audit found, and
   (b) it gives the audited-clean servers a clean bill (no P0/P1).
 
-Skips gracefully if the fleet repos aren't present (CI on another machine).
+The fleet root is never hardcoded — these tests read it from the
+MCP_SCANNER_FLEET_ROOT env var (same as the CLI). They skip gracefully
+whenever that var is unset or the fleet repos aren't present (e.g. CI on
+another machine, or any environment other than the operator's own).
 """
+
+import os
 
 import pytest
 
-from mcp_scanner.cli import FLEET_ROOT, run_self_audit
+from mcp_scanner.cli import FLEET_ROOT_ENV_VAR, get_fleet_root, run_self_audit
 from mcp_scanner.scanner import scan_repo
 
 CLEAN_SERVERS = ["github-mcp", "bus-mcp", "desktop-mcp", "rag-mcp", "discord-mcp"]
 
 
+def _fleet_root_or_none():
+    raw = os.environ.get(FLEET_ROOT_ENV_VAR)
+    return get_fleet_root() if raw else None
+
+
 def _have_fleet():
-    return (FLEET_ROOT / "mcp-factory").exists()
+    root = _fleet_root_or_none()
+    return root is not None and (root / "mcp-factory").exists()
 
 
-pytestmark = pytest.mark.skipif(not _have_fleet(), reason="fleet MCP servers not present")
+# Applied per-test (not module-wide) so test_self_audit_errors_clearly_without_env_var
+# below — which specifically exercises the unset-env-var path — still runs even when
+# MCP_SCANNER_FLEET_ROOT is unset.
+requires_fleet = pytest.mark.skipif(
+    not _have_fleet(),
+    reason=f"{FLEET_ROOT_ENV_VAR} unset or fleet MCP servers not present",
+)
 
 
+@requires_fleet
 def test_mcp_factory_flags_codegen_injection():
-    r = scan_repo(str(FLEET_ROOT / "mcp-factory"))
+    fleet_root = get_fleet_root()
+    r = scan_repo(str(fleet_root / "mcp-factory"))
     cg = [f for f in r.findings if f.vuln_class == "codegen-injection"]
     assert cg, "scanner must flag the mcp-factory codegen-injection class"
 
 
+@requires_fleet
 @pytest.mark.parametrize("name", CLEAN_SERVERS)
 def test_clean_servers_get_clean_bill(name):
-    target = FLEET_ROOT / name
+    fleet_root = get_fleet_root()
+    target = fleet_root / name
     if not target.exists():
         pytest.skip(f"{name} not present")
     r = scan_repo(str(target))
@@ -41,6 +62,7 @@ def test_clean_servers_get_clean_bill(name):
     )
 
 
+@requires_fleet
 def test_self_audit_shape():
     results = run_self_audit()
     assert len(results) >= 1
@@ -49,3 +71,9 @@ def test_self_audit_shape():
         assert not by_name["mcp-factory"].clean_bill or any(
             f.vuln_class == "codegen-injection" for f in by_name["mcp-factory"].findings
         )
+
+
+def test_self_audit_errors_clearly_without_env_var(monkeypatch):
+    monkeypatch.delenv(FLEET_ROOT_ENV_VAR, raising=False)
+    with pytest.raises(RuntimeError, match=FLEET_ROOT_ENV_VAR):
+        run_self_audit()
