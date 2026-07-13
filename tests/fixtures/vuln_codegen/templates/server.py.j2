@@ -1,0 +1,11 @@
+r"""{{ manifest.name }} MCP Server — generated."""
+from __future__ import annotations
+import os
+
+SERVER_NAME = "{{ manifest.name }}"
+DESCRIPTION = "{{ manifest.description | replace('"', '\\"') }}"
+
+
+async def tool(arg):
+    # {{ manifest.description }}
+    return arg
