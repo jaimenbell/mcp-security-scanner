@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .scanner import scan_repo
 from .reporting import render_markdown, render_json, render_summary_line
+from .client_report import render_client_report
 from .models import ScanResult
 
 # The operator's real MCP servers. mcp-factory is the known-vulnerable target
@@ -69,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("path", nargs="?", help="path to an MCP server repo")
     parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument("--client-report", action="store_true",
+                        help="emit the 8-section client-facing consulting report "
+                             "instead of the terse markdown summary")
+    parser.add_argument("--client-name", default="the client",
+                        help="client name for the --client-report header")
     parser.add_argument("--self-audit", action="store_true",
                         help="scan the fleet's own MCP servers (dogfood proof)")
     parser.add_argument("--fail-on", choices=["P0", "P1", "P2", "P3"], default=None,
@@ -99,7 +105,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("provide a path to scan, or use --self-audit")
 
     result = scan_repo(args.path)
-    print(render_json(result) if args.json else render_markdown(result))
+    if args.json:
+        print(render_json(result))
+    elif args.client_report:
+        print(render_client_report(result, client_name=args.client_name))
+    else:
+        print(render_markdown(result))
     return _exit_code([result], args.fail_on)
 
 

@@ -84,5 +84,6 @@ python -m mcp_scanner.cli --self-audit
 - **Not a SaaS.** It's a CLI you run locally or wire into CI
   (`--fail-on P1`). No hosted service exists today.
 
-28 tests (`python -m pytest -q`): matched vuln/clean fixture pairs per
-detector, plus the self-audit proof above.
+44 tests (`python -m pytest -q`): matched vuln/clean fixture pairs per
+detector, the self-audit proof above, and the 8-section client-report
+renderer.

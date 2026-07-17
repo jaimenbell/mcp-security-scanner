@@ -30,6 +30,7 @@ Every finding carries **severity** (P0 critical → P3 hardening nit), **confide
 # from the repo root
 python -m mcp_scanner.cli <path-to-mcp-server>          # markdown report
 python -m mcp_scanner.cli <path> --json                 # JSON
+python -m mcp_scanner.cli <path> --client-report --client-name "Acme"  # 8-section client report
 python -m mcp_scanner.cli <path> --fail-on P1           # CI gate: exit 2 on P0/P1
 python -m mcp_scanner.cli --self-audit                  # scan your own fleet's servers
 ```
@@ -81,7 +82,7 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 28 tests: per-detector vuln/clean fixtures + the self-audit proof
+python -m pytest -q     # 44 tests: per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
 ```
 
 The self-audit tests (7 of the 28) require `MCP_SCANNER_FLEET_ROOT` to be set
