@@ -44,10 +44,11 @@ Provider does not run, deploy, or execute anything in `[Client]`'s stack.
 
 **What the tool genuinely did.** It read the git-tracked source of the
 target repo (Python AST for the deep path, regex for Jinja/JS/TS) and ran
-four detector families -- codegen/template injection, tool-param
-injection, auth/network posture, and secret handling -- producing the
-severity- and confidence-ranked findings table above with a file:line for
-each hit.
+six detector families -- codegen/template injection, tool-param
+injection, auth/network posture, secret handling, write-tools-on-by-default
+/ tool-scope-creep, and secret-leak-via-tool-response (the last two added
+2026-07-19) -- producing the severity- and confidence-ranked findings table
+above with a file:line for each hit.
 
 **What was expert-led (not the tool).** Separating true positives from
 low-confidence heuristic noise; confirming a finding is actually reachable
@@ -55,13 +56,10 @@ from an attacker-controlled input; the fix-shape and ranked fix-lane plan
 below.
 
 **What it does NOT do -- stated plainly.** No dynamic analysis, no
-cross-file taint tracking (same-file heuristics only). No MCP-manifest /
-`@mcp.tool()`-decorator awareness yet: it does not detect
-**write-tools-on-by-default / tool-scope-creep** or
-**secret-leak-via-tool-response** -- two MCP-specific hazard classes that
-are NOT yet built (see the Detector-class reference below). No git-history
-secret scanning (pair with `gitleaks`). No JS/TS AST parity (regex-level
-only).
+cross-file taint tracking beyond a single-hop helper-delegation check
+(same-file-or-one-hop heuristics only). No `server.json`/tool-schema
+parsing to independently confirm reachability. No git-history secret
+scanning (pair with `gitleaks`). No JS/TS AST parity (regex-level only).
 
 *(The "above"/"below" references match this text's placement in the
 delivered report, D1 §5-7; in this SOW they refer to that same report.)*
@@ -72,7 +70,7 @@ delivered report, D1 §5-7; in this SOW they refer to that same report.)*
 
 | # | Deliverable | Contents |
 |---|---|---|
-| D1 | Client-facing report | 8-section report: exec summary in plain incident language, top-3-to-fix, findings table (file:line · severity · class · remediation · confidence), critical-evidence appendix, detector-class reference (incl. the NOT-yet-built disclosure above), Capability statement verbatim, ranked fix-lane plan. |
+| D1 | Client-facing report | 8-section report: exec summary in plain incident language, top-3-to-fix, findings table (file:line · severity · class · remediation · confidence), critical-evidence appendix, detector-class reference (all six classes), Capability statement verbatim, ranked fix-lane plan. |
 | D2 | Raw JSON | Machine-readable findings for your own tooling / CI, via `mcp-scan <path> --json`. |
 | D3 | Ranked fix-lane plan | Findings sequenced by severity, each with a concrete fix-shape. Doubles as the scope of a follow-on fix engagement. |
 
@@ -98,9 +96,6 @@ delivered report, D1 §5-7; in this SOW they refer to that same report.)*
 - **No full JS/TS AST parity.** Regex-level for non-Python source.
 - **No git-history secret scanning.** Pair with `gitleaks` for history;
   not rebuilt here.
-- **No write-tools-on-by-default / secret-leak-via-tool-response
-  detection.** Not yet built -- see §2. If this is your primary concern,
-  say so; a manual review covers it today, this scanner does not.
 - **No hosted/SaaS dashboard.** CLI + CI gate (`--fail-on P1`) only.
 - **Boundary = the repo named in §1.** Anything outside it is a new quote.
 

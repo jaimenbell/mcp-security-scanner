@@ -45,7 +45,7 @@ This is **ranked #2** of the new angles and explicitly **sequenced *after* the r
 
 ## Prototype status → what a real product still needs
 
-**Done (this repo):** four grounded detectors, AST-based Python analysis, honest confidence/severity model, client-facing markdown + JSON reports, an 8-section consulting-grade client report (`mcp_scanner/client_report.py`, `--client-report`), a sales kit (`docs/CLIENT_ONE_PAGER.md`, `docs/SOW_TEMPLATE.md`, `staged/sales-kit/pricing-tiers.md`, `staged/sales-kit/objection-faq.md`), CI gate, and a passing dogfood self-audit against six real servers. This is Phase 0 of `mcp-security-scanner-retainer-spec-2026-07-16.md` (report upgrade + sales-kit clone, deliberately NOT the 2 new detectors below -- gated on a real demand signal first, per the spec's own dead-but-GREEN doctrine warning).
+**Done (this repo):** six grounded detectors (the original four, plus two shipped 2026-07-19: write-tools-on-by-default/tool-scope-creep and secret-leak-via-tool-response), AST-based Python analysis, honest confidence/severity model, client-facing markdown + JSON reports, an 8-section consulting-grade client report (`mcp_scanner/client_report.py`, `--client-report`), a sales kit (`docs/CLIENT_ONE_PAGER.md`, `docs/SOW_TEMPLATE.md`, `staged/sales-kit/pricing-tiers.md`, `staged/sales-kit/objection-faq.md`), CI gate, and a passing dogfood self-audit against six real servers. This was Phase 0 of `mcp-security-scanner-retainer-spec-2026-07-16.md`; the sales-kit docs still need a pass to reflect the two new detectors landing (see each doc's own "update in the same wave" note).
 
 **Still needed before it's a sellable SaaS:**
 

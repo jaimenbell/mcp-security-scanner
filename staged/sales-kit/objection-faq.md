@@ -10,27 +10,26 @@ tags: [mcp-security-scanner, sales-kit, objections, faq]
 # Objection FAQ -- MCP Security Scanner
 
 Every answer below is grounded in what the scanner actually does today.
-Nothing here should be said if it isn't true yet -- if capability changes
-(the two undetected classes ship), update this file in the same wave.
+Nothing here should be said if it isn't true yet. Updated 2026-07-19: the
+two previously-undetected classes (write-tools-on-by-default/tool-scope-creep,
+secret-leak-via-tool-response) shipped; this file was updated in the same
+wave per its own standing instruction.
 
 ---
 
 ## "Do you detect write-tools-on-by-default or secret-leak-via-tool-response?"
 
-**Not yet. Say this first, before anything else, if it's asked.** These are
-exactly the MCP-specific hazard classes a security pitch would naturally
-lead with, and this scanner does not check for them today. The 4 built
-detectors are generic-Python-appsec checks (codegen injection, tool-param
-injection, auth/network posture, secret handling) -- they apply to an MCP
-server because it's a Python process, but none of them parse
-`@mcp.tool()`/`FastMCP` registrations or reason about what a tool's
-`return` value sends back to the calling LLM. If either of these is the
-client's actual concern, a manual review covers it today, not this
-scanner -- say so plainly rather than implying otherwise.
+**Yes, as of 2026-07-19.** These are exactly the MCP-specific hazard
+classes a security pitch would naturally lead with, and this scanner now
+checks for both (detectors 5 and 6 -- the original four are generic-
+Python-appsec checks; these two parse `@mcp.tool()`/`FastMCP` registrations
+and reason about what a tool's `return` value sends back to the calling
+LLM). Still true: no MCP-manifest/`server.json`-schema parsing to
+independently confirm reachability -- that remains a manual-review gap.
 
 ## "Isn't this just grep / a regex scanner?"
 
-Two of the four detectors are AST-based (Python), and the tool-param and
+Two of the six detectors are AST-based (Python), and the tool-param and
 auth-posture checks pattern-match real dangerous sinks (`shell=True`,
 `eval` on non-constants, `pickle.load`, unsafe `yaml.load`), not bare text
 search. That said: it *is* static, heuristic, same-file-only, and says so
@@ -41,7 +40,7 @@ specifically because it covers narrower, more automatable ground.
 ## "Why not just run Semgrep / Bandit?"
 
 Those are general-purpose SAST tools with broad rule sets; this scanner is
-narrower and MCP-context-scoped -- the 4 classes are each grounded in a
+narrower and MCP-context-scoped -- the 6 classes are each grounded in a
 real finding from a fleet-wide audit of production MCP servers, not a
 generic ruleset. It's complementary, not a replacement: pairing this with
 a general SAST tool and `gitleaks` for git-history secrets is the honest
@@ -57,7 +56,7 @@ analysis and no live network calls against the target.
 
 Already demonstrated, honestly: `--self-audit` gives 5 of the operator's
 own 6 production MCP servers a clean bill (no P0/P1) and flags the one
-with a known issue. If your repo is genuinely clean against these 4
+with a known issue. If your repo is genuinely clean against these 6
 detector classes, the report says so plainly -- it does not manufacture a
 finding to justify the fee. A clean bill also isn't a guarantee: the
 report's Scope & method section states what static analysis can and
@@ -78,7 +77,7 @@ full coverage.
 That reflects the actual scope: a tooled scan plus human triage separating
 real findings from heuristic noise, delivered as an 8-section report with
 a file:line and a concrete fix for every finding. It's priced below a full
-expert-adjudicated audit on purpose -- this is 4 automatable detector
+expert-adjudicated audit on purpose -- this is 6 automatable detector
 classes with a tested false-positive floor (every detector ships a
 matched vuln/clean fixture pair), not a hand-built hazard catalog with
 live-evidence reproduction. If the finding count or repo size pushes past

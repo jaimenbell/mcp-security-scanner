@@ -19,14 +19,14 @@ the next -- the chain is a natural sequence, not a lock-in.
 **Standalone. Opens every engagement. No commitment past it.**
 
 What's included:
-- A full scan of the target repo's git-tracked source across the 4 built
+- A full scan of the target repo's git-tracked source across the 6 built
   detector families (codegen injection, tool-param injection, auth/network
-  posture, secret handling).
+  posture, secret handling, write-tools-on-by-default/tool-scope-creep,
+  secret-leak-via-tool-response -- the last two added 2026-07-19).
 - The 8-section client report (`mcp_scanner/client_report.py`): exec
   summary, top-3-to-fix, findings table with remediation + confidence,
-  critical-evidence appendix, detector-class reference (with the honest
-  NOT-yet-built disclosure), Capability statement verbatim, ranked
-  fix-lane plan.
+  critical-evidence appendix, detector-class reference (all six classes),
+  Capability statement verbatim, ranked fix-lane plan.
 - Raw JSON export for the client's own tooling.
 
 Effort shape: scan + report render is near-instant tooled work; the
@@ -38,9 +38,9 @@ variable file path in a test fixture) before it's called a finding.
 size and finding count, not a generic package. This band is
 *intentionally lower* than a full expert-adjudicated audit (compare
 reliability-retainer's $5-15k reliability audit) because this scanner
-covers narrower, more automatable ground -- 4 generic-appsec detector
-classes with a tested false-positive floor, not a hand-built hazard
-catalog with live-system evidence reproduction.
+covers narrower, more automatable ground -- 6 generic-appsec/MCP-aware
+detector classes with a tested false-positive floor, not a hand-built
+hazard catalog with live-system evidence reproduction.
 
 **What triggers the upsell to Tier 2:** any P0/P1 finding raises the
 natural next question -- "how do I stop this from regressing." Tier 2
@@ -96,11 +96,12 @@ regressions -> Fix-It closes the found gaps.**
 Every tier stands alone if that's all the client wants. Nothing here is
 sold as a bundle they have to buy up front.
 
-## What none of these tiers include, at any price -- stated plainly
+## What's now included that wasn't before (updated 2026-07-19)
 
 Write-tools-on-by-default / tool-scope-creep detection and
-secret-leak-via-tool-response detection are **not yet built** (see
-`PRODUCT.md` and the Capability statement in every delivered report). Do
-not price or pitch these as included until they ship. If a prospect's
-primary concern is one of these two classes, say so plainly before
-quoting.
+secret-leak-via-tool-response detection **shipped 2026-07-19** and are
+included in every Tier-1 scan at no extra charge (see `PRODUCT.md` and the
+Capability statement in every delivered report). What's still NOT
+included at any tier: cross-file taint tracking beyond a single-hop
+helper check, `server.json`/tool-schema-based reachability confirmation,
+git-history secret scanning, and full JS/TS AST parity.
