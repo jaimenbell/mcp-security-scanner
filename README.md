@@ -13,7 +13,7 @@ A static security scanner for [Model Context Protocol](https://modelcontextproto
 
 ## What it scans
 
-Four detector families, each grounded in a real finding from a fleet-wide audit of production MCP servers:
+Six detector families, each grounded in a real finding from a fleet-wide audit of production MCP servers:
 
 | # | Class | Detects |
 |---|---|---|
@@ -21,6 +21,8 @@ Four detector families, each grounded in a real finding from a fleet-wide audit 
 | 2 | **Tool-param injection** | `subprocess(shell=True)`, `os.system`, `eval`/`exec` on non-constants, `pickle.load`, `yaml.load` without `SafeLoader`, SSRF (caller-influenced fetch URL, no allowlist), path traversal (variable file path, no containment). |
 | 3 | **Auth / network posture** | Bind on `0.0.0.0` (escalates when paired with `debug=True`), Werkzeug/uvicorn `debug=True`, mutating routes (POST/PUT/DELETE/PATCH) with no auth dependency, no rate limiter on a networked server. |
 | 4 | **Secret handling** | Tracked `.env` / `*.pem` / `*.key` / keypair JSON, hardcoded secret literals (value-shape + secret-named assignments), secrets passed to log/print. |
+| 5 | **Write-tools-on-by-default / tool-scope-creep** (added 2026-07-19) | A mutating `@mcp.tool()`/`@server.tool()`-registered tool (name/verb or dangerous-sink-body heuristic, one hop through a delegated helper) with no visible gate -- decorator, env-flag opt-in, or permission check. |
+| 6 | **Secret-leak-via-tool-response** (added 2026-07-19) | An `@mcp.tool()`/`@server.tool()` function whose `return` expression hands back `os.environ`, a whole config/settings object, or a secret-named/secret-shaped value to the calling LLM. |
 
 Every finding carries **severity** (P0 critical → P3 hardening nit), **confidence** (high / medium / low), the offending `file:line`, and a concrete fix.
 
@@ -82,10 +84,10 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 44 tests: per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
+python -m pytest -q     # 55 tests (48 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
 ```
 
-The self-audit tests (7 of the 28) require `MCP_SCANNER_FLEET_ROOT` to be set
+The self-audit tests (7 of the 55) require `MCP_SCANNER_FLEET_ROOT` to be set
 and pointed at real MCP server repos to scan; they skip cleanly if it's
 unset (e.g. in a fresh clone or CI on another machine). See
 [ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.

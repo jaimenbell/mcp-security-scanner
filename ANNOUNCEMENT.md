@@ -17,7 +17,7 @@ status: prototype
 ## What it does
 
 Point it at an MCP server repo. It reads the git-tracked source (Python AST
-for the deep path, regex for Jinja/JS/TS) and checks for four vulnerability
+for the deep path, regex for Jinja/JS/TS) and checks for six vulnerability
 classes, each grounded in a real finding from a fleet-wide audit of
 production MCP servers:
 
@@ -31,6 +31,10 @@ production MCP servers:
    `debug=True`), mutating routes with no auth dependency, no rate limiter.
 4. **Secret handling** — tracked `.env`/`.pem`/`.key` files, hardcoded
    secret-shaped literals, secrets passed to log/print.
+5. **Write-tools-on-by-default / tool-scope-creep** (added 2026-07-19) — a
+   mutating `@mcp.tool()`-registered tool with no visible permission gate.
+6. **Secret-leak-via-tool-response** (added 2026-07-19) — a tool's `return`
+   value leaking a credential back to the calling LLM.
 
 Every finding carries a severity (P0 critical -> P3 hardening nit), a
 confidence (high/medium/low), a `file:line`, and a concrete fix. Findings
@@ -84,6 +88,7 @@ python -m mcp_scanner.cli --self-audit
 - **Not a SaaS.** It's a CLI you run locally or wire into CI
   (`--fail-on P1`). No hosted service exists today.
 
-44 tests (`python -m pytest -q`): matched vuln/clean fixture pairs per
-detector, the self-audit proof above, and the 8-section client-report
-renderer.
+55 tests (`python -m pytest -q`; 48 pass by default, 7 self-audit tests
+skip without `MCP_SCANNER_FLEET_ROOT` set): matched vuln/clean fixture
+pairs per detector, the self-audit proof above, and the 8-section
+client-report renderer.

@@ -26,7 +26,7 @@ claim -- it's `tests/test_self_audit.py`.
 
 ## What it actually checks today
 
-Four detector families, each grounded in a real finding from a fleet-wide
+Six detector families, each grounded in a real finding from a fleet-wide
 audit of production MCP servers:
 
 | # | Class | Detects |
@@ -35,25 +35,21 @@ audit of production MCP servers:
 | 2 | Tool-param injection | `subprocess(shell=True)`, `os.system`, non-constant `eval`/`exec`, `pickle.load`, unsafe `yaml.load`, SSRF, path traversal. |
 | 3 | Auth / network posture | Bind `0.0.0.0` (+debug escalation), mutating routes with no auth dependency, no rate limiter. |
 | 4 | Secret handling | Tracked `.env`/`.pem`/`.key` files, hardcoded secret-shaped literals, secrets passed to log/print. |
+| 5 | Write-tools-on-by-default / tool-scope-creep (added 2026-07-19) | A mutating `@mcp.tool()`-registered tool with no visible permission gate. |
+| 6 | Secret-leak-via-tool-response (added 2026-07-19) | A tool's `return` value leaking a credential back through the protocol to the calling LLM. |
 
 Every finding carries a severity (P0 critical -> P3 hardening nit), a
 confidence (high/medium/low), a `file:line`, and a concrete fix.
 
-## What it does NOT check yet -- stated plainly
+## Honest capability boundary -- stated plainly
 
-These 4 detectors are generic-Python-appsec checks; they apply to an MCP
-server because it's a Python process, but none of them are MCP-protocol-
-aware. Two hazard classes an MCP-specific pitch would naturally lead with
-are **not yet built**:
-
-- **Write-tools-on-by-default / tool-scope-creep** -- whether a mutating
-  `@mcp.tool()`-registered tool has any visible permission gate.
-- **Secret-leak-via-tool-response** -- whether a tool's `return` value
-  leaks a credential back through the protocol to the calling LLM.
-
-If your main worry is one of these two, say so up front -- the honest
-answer today is that a manual review, not this scanner, is what covers it.
-(Both are scoped, not hand-waved -- see `PRODUCT.md` in the repo.)
+The two MCP-protocol-specific hazard classes an MCP-specific pitch would
+naturally lead with -- write-tools-on-by-default/tool-scope-creep and
+secret-leak-via-tool-response -- **now ship** (added 2026-07-19, detectors
+5 and 6 above). What's still generic-Python-appsec-only rather than
+MCP-manifest-aware: no cross-file taint tracking, no `server.json`/tool-schema
+parsing to confirm reachability. (See `PRODUCT.md` in the repo for the
+full remaining-gap list.)
 
 ## Packages
 
