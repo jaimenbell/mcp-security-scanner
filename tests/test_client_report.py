@@ -115,10 +115,18 @@ def test_no_p0_findings_says_so_plainly():
 def test_scope_method_quotes_capability_statement_and_discloses_gap():
     out = client_report.render_client_report(_sample_result(), client_name="Acme")
     assert client_report.CAPABILITY_STATEMENT in out
-    # the load-bearing honesty lines -- must not oversell undetected classes
-    assert "write-tools-on-by-default" in out
+    # tool-scope-creep and secret-leak-via-tool-response shipped 2026-07-19
+    # and are now BUILT detectors -- they must appear in the built-detector
+    # table, not the not-yet-built disclosure.
+    assert "tool-scope-creep" in out
     assert "secret-leak-via-tool-response" in out
+    built = out.split("**Built and checked in this scan:**")[1].split("**NOT yet built")[0]
+    assert "tool-scope-creep" in built
+    assert "secret-leak-via-tool-response" in built
+    # the genuinely-remaining gaps must still be disclosed honestly
     assert "not yet" in out.lower() or "NOT yet" in out
+    assert "Cross-file/cross-repo taint tracking" in out
+    assert "Git-history secret scanning" in out
 
 
 def test_fix_lane_plan_doubles_as_next_quote():

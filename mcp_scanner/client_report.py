@@ -16,10 +16,11 @@ a founder can read -- not a pattern dump:
   4. Findings by severity table -- + remediation + confidence columns
   5. Critical evidence appendix -- a reproducible proof per P0 (no P0
                                     without one)
-  6. Detector-class reference -- what the 4 built detectors cover, plus an
-                                  explicit, honest disclosure of the two
-                                  MCP-specific hazard classes this scanner
-                                  does NOT yet detect
+  6. Detector-class reference -- what the 6 built detectors cover, plus an
+                                  explicit, honest disclosure of what this
+                                  scanner still does NOT detect (cross-file
+                                  taint, git-history secrets, JS/TS AST
+                                  parity, dynamic analysis)
   7. Scope & method     -- the capability statement, VERBATIM
   8. Ranked fix-lane plan -- doubles as the next quote
 
@@ -62,6 +63,12 @@ VULN_CLASS_INCIDENT_LANG = {
                      "visible auth gate or rate limiter",
     "secret-handling": "a secret committed to the tree, hardcoded in "
                         "source, or passed to a log/print call",
+    "tool-scope-creep": "a mutating MCP tool registered with no visible "
+                         "permission-group gate or env-flag opt-in",
+    "secret-leak-via-tool-response": "a tool response that hands a "
+                                      "credential or a whole config/"
+                                      "environment dump back to the "
+                                      "calling LLM",
 }
 
 DETECTOR_CLASS_TABLE = [
@@ -74,20 +81,43 @@ DETECTOR_CLASS_TABLE = [
                       "routes with no auth dependency, no rate limiter."),
     ("secret-handling", "Tracked `.env`/`.pem`/`.key`/keypair files, hardcoded "
                          "secret-shaped literals, secrets passed to `print`/`log.*`."),
+    ("tool-scope-creep", "A mutating `@mcp.tool()`-registered tool (by verb-name "
+                          "heuristic or a dangerous body sink, one hop through a "
+                          "delegated helper) with no visible permission-group gate "
+                          "or env-flag opt-in anywhere in its file or the helper it "
+                          "calls."),
+    ("secret-leak-via-tool-response", "A tool's `return` value that hands back "
+                                       "`os.environ`, a whole config/settings object "
+                                       "(`vars()`/`asdict()`/`__dict__`), a "
+                                       "secret-named field, or a hardcoded "
+                                       "secret-shaped literal to the calling LLM."),
 ]
 
-# The two MCP-specific hazard classes the scanner does NOT yet detect,
-# stated plainly per the spec's own honesty finding (§1.2) -- these are
-# exactly the classes the brainstorm pitch leads with, and overclaiming
-# them here would be exactly the kind of unearned specificity the
-# operator's honesty doctrine warns against.
+# Historical note: this list used to carry write-tools-on-by-default /
+# tool-scope-creep and secret-leak-via-tool-response as NOT yet built --
+# both shipped 2026-07-19 (mcp-security-scanner-retainer-spec-2026-07-16.md
+# §1.2/§4 Phase 1) and now have their own rows in DETECTOR_CLASS_TABLE
+# above. What's left here is the genuinely still-true, deliberately
+# out-of-scope list (spec §1.3 / this repo's own PRODUCT.md), stated
+# plainly so the report never overclaims coverage it doesn't have.
 NOT_YET_BUILT = [
-    ("write-tools-on-by-default / tool-scope-creep",
-     "whether a mutating `@mcp.tool()`-registered tool has any visible "
-     "permission-group gate or env-flag opt-in"),
-    ("secret-leak-via-tool-response",
-     "whether a tool handler's `return` value leaks a credential back "
-     "through the protocol to the calling LLM"),
+    ("Cross-file/cross-repo taint tracking",
+     "whether a value flows from an untrusted tool argument, through "
+     "another file or module, into a dangerous sink -- every detector "
+     "above is a same-file (or, for tool-scope-creep, one-hop) heuristic, "
+     "not a real call graph"),
+    ("Git-history secret scanning",
+     "whether a credential was ever committed and later removed -- this "
+     "scan only sees the current git-tracked working tree (pair with "
+     "`gitleaks` for history)"),
+    ("Full JS/TS AST parity",
+     "the JS/TS surface stays regex-level rather than a real parse tree, "
+     "so some patterns the Python AST path catches precisely are only "
+     "regex-approximated there"),
+    ("Any dynamic/runtime analysis",
+     "whether a flagged pattern is actually reachable and exploitable at "
+     "runtime -- this is a static scan by design; every finding still "
+     "needs a human to confirm reachability"),
 ]
 
 SELF_SERVE_CHECKLIST = [
@@ -106,24 +136,25 @@ SELF_SERVE_CHECKLIST = [
 CAPABILITY_STATEMENT = """\
 **What the tool genuinely did.** It read the git-tracked source of the \
 target repo (Python AST for the deep path, regex for Jinja/JS/TS) and ran \
-four detector families -- codegen/template injection, tool-param \
-injection, auth/network posture, and secret handling -- producing the \
-severity- and confidence-ranked findings table above with a file:line for \
-each hit.
+six detector families -- codegen/template injection, tool-param \
+injection, auth/network posture, secret handling, tool-scope-creep \
+(mutating `@mcp.tool()`-registered tools with no visible permission gate), \
+and secret-leak-via-tool-response (a tool's own `return` value leaking a \
+credential or a whole config/environment dump back to the calling LLM) -- \
+producing the severity- and confidence-ranked findings table above with a \
+file:line for each hit.
 
 **What was expert-led (not the tool).** Separating true positives from \
 low-confidence heuristic noise; confirming a finding is actually \
 reachable from an attacker-controlled input; the fix-shape and ranked \
 fix-lane plan below.
 
-**What it does NOT do -- stated plainly.** No dynamic analysis, no \
-cross-file taint tracking (same-file heuristics only). No MCP-manifest / \
-`@mcp.tool()`-decorator awareness yet: it does not detect \
-**write-tools-on-by-default / tool-scope-creep** or \
-**secret-leak-via-tool-response** -- two MCP-specific hazard classes that \
-are NOT yet built (see the Detector-class reference below). No git-history \
-secret scanning (pair with `gitleaks`). No JS/TS AST parity (regex-level \
-only)."""
+**What it does NOT do -- stated plainly.** No dynamic analysis. No \
+cross-file/cross-repo taint tracking (same-file heuristics only, with one \
+deliberate one-hop exception in tool-scope-creep for a directly-called \
+gating helper). No git-history secret scanning (pair with `gitleaks`). No \
+JS/TS AST parity (regex-level only). See the Detector-class reference \
+below for the full built-vs-not-built breakdown."""
 
 
 # --------------------------------------------------------------------- #
