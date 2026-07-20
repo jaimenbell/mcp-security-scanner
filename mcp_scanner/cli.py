@@ -33,6 +33,8 @@ FLEET_SERVERS = [
     "desktop-mcp",   # clean
     "rag-mcp",       # clean
     "discord-mcp",   # clean
+    "rails-mcp",     # added 2026-07-19 -- 8th flagship, was missing from fleet self-audit
+    "vllm-ops-mcp",  # added 2026-07-19 -- 7th flagship, was missing from fleet self-audit
 ]
 
 
