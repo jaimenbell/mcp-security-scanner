@@ -69,6 +69,13 @@ VULN_CLASS_INCIDENT_LANG = {
                                       "credential or a whole config/"
                                       "environment dump back to the "
                                       "calling LLM",
+    "job-overbroad-scope": "a scheduled job or wrapper granted broader "
+                            "credential/ACL scope than it needs",
+    "job-destructive-no-confirm": "a destructive call in a scheduled job "
+                                   "or wrapper with no confirm-before-"
+                                   "destroy gate",
+    "job-unverified-success": "a job that can report success without "
+                               "verifying what it actually did",
 }
 
 DETECTOR_CLASS_TABLE = [
@@ -91,6 +98,12 @@ DETECTOR_CLASS_TABLE = [
                                        "(`vars()`/`asdict()`/`__dict__`), a "
                                        "secret-named field, or a hardcoded "
                                        "secret-shaped literal to the calling LLM."),
+    ("job-hazards", "Scheduled jobs/wrappers/IaC-CI files (cron, systemd, GitHub "
+                     "Actions, PowerShell/bash/batch deploy scripts): over-broad "
+                     "credential/ACL scope, a destructive call with no "
+                     "confirm-before-destroy gate, and success reported without "
+                     "verification (`|| true`, bare `exit 0`, `continue-on-error`, "
+                     "empty `catch {}`)."),
 ]
 
 # Historical note: this list used to carry write-tools-on-by-default /
@@ -135,14 +148,16 @@ SELF_SERVE_CHECKLIST = [
 # re-skinned for this scanner's real detectors and real gaps.
 CAPABILITY_STATEMENT = """\
 **What the tool genuinely did.** It read the git-tracked source of the \
-target repo (Python AST for the deep path, regex for Jinja/JS/TS) and ran \
-six detector families -- codegen/template injection, tool-param \
-injection, auth/network posture, secret handling, tool-scope-creep \
-(mutating `@mcp.tool()`-registered tools with no visible permission gate), \
-and secret-leak-via-tool-response (a tool's own `return` value leaking a \
-credential or a whole config/environment dump back to the calling LLM) -- \
-producing the severity- and confidence-ranked findings table above with a \
-file:line for each hit.
+target repo (Python AST for the deep path, regex for Jinja/JS/TS/YAML/ \
+PowerShell/bash) and ran seven detector families -- codegen/template \
+injection, tool-param injection, auth/network posture, secret handling, \
+tool-scope-creep (mutating `@mcp.tool()`-registered tools with no visible \
+permission gate), secret-leak-via-tool-response (a tool's own `return` \
+value leaking a credential or a whole config/environment dump back to the \
+calling LLM), and job-hazards (over-broad scope, unconfirmed destructive \
+calls, and unverified-success patterns in scheduled jobs, wrappers, and \
+IaC/CI files) -- producing the severity- and confidence-ranked findings \
+table above with a file:line for each hit.
 
 **What was expert-led (not the tool).** Separating true positives from \
 low-confidence heuristic noise; confirming a finding is actually \
