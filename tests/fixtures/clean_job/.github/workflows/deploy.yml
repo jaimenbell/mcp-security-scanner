@@ -1,0 +1,22 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: nuke old release
+        run: |
+          if [ "$CONFIRM_DESTROY" = "yes" ]; then
+            rm -rf /var/www/releases/*
+          fi
+      - name: cleanup
+        run: ./teardown.sh
