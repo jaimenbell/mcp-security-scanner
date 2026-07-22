@@ -9,6 +9,7 @@ from .auth_posture import AuthPostureDetector
 from .secret_handling import SecretHandlingDetector
 from .tool_scope_creep import ToolScopeCreepDetector
 from .secret_leak_response import SecretLeakResponseDetector
+from .job_hazards import JobHazardsDetector
 
 ALL_DETECTORS: list[Detector] = [
     CodegenInjectionDetector(),
@@ -17,6 +18,7 @@ ALL_DETECTORS: list[Detector] = [
     SecretHandlingDetector(),
     ToolScopeCreepDetector(),
     SecretLeakResponseDetector(),
+    JobHazardsDetector(),
 ]
 
 __all__ = [
@@ -24,4 +26,5 @@ __all__ = [
     "CodegenInjectionDetector", "ParamInjectionDetector",
     "AuthPostureDetector", "SecretHandlingDetector",
     "ToolScopeCreepDetector", "SecretLeakResponseDetector",
+    "JobHazardsDetector",
 ]
