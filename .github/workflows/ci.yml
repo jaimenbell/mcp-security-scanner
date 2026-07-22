@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + README count-verification gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (dev extra)
+        run: pip install -e ".[dev]"
+
+      - name: Run test suite
+        run: python -m pytest -q --junitxml=junit.xml
+
+      - name: README count-verification gate
+        run: python scripts/check_readme_counts.py --readme README.md --junit-xml junit.xml

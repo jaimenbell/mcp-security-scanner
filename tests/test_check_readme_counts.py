@@ -1,0 +1,151 @@
+"""Unit tests for scripts/check_readme_counts.py -- the CI count-verification
+gate. Exercises the three pure functions (parse claimed counts from README
+text, parse actual counts from a junitxml fixture, compare the two) without
+invoking a real pytest subprocess, so these tests are fast and deterministic.
+
+Covers the three required scenarios: claimed matches actual, claimed drifts
+from actual, and the claim is missing/unparseable from the README.
+"""
+from __future__ import annotations
+
+import importlib.util
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "check_readme_counts.py"
+_spec = importlib.util.spec_from_file_location("check_readme_counts", _SCRIPT_PATH)
+check_readme_counts = importlib.util.module_from_spec(_spec)
+sys.modules["check_readme_counts"] = check_readme_counts
+_spec.loader.exec_module(check_readme_counts)
+
+
+# ---------------------------------------------------------------------------
+# parse_claimed_counts -- anchored to the real README phrasing:
+#   "# 162 tests (155 passing, 7 self-audit skip without the env var below)"
+# ---------------------------------------------------------------------------
+
+def test_parse_claimed_counts_matches_real_phrasing():
+    readme = textwrap.dedent(
+        """
+        ```bash
+        python -m pytest -q     # 162 tests (155 passing, 7 self-audit skip without the env var below): stuff
+        ```
+        """
+    )
+    claim = check_readme_counts.parse_claimed_counts(readme)
+    assert claim == check_readme_counts.Counts(total=162, passed=155, skipped=7)
+
+
+def test_parse_claimed_counts_missing_claim_returns_none():
+    readme = "# mcp-security-scanner\n\nNo test count mentioned anywhere in here.\n"
+    claim = check_readme_counts.parse_claimed_counts(readme)
+    assert claim is None
+
+
+def test_parse_claimed_counts_ignores_unrelated_numbers():
+    readme = "This scanner covers 7 detector families across 6 real servers.\n"
+    claim = check_readme_counts.parse_claimed_counts(readme)
+    assert claim is None
+
+
+# ---------------------------------------------------------------------------
+# parse_actual_counts -- from a pytest --junitxml report
+# ---------------------------------------------------------------------------
+
+_JUNIT_MATCH = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+<testsuite name="pytest" errors="0" failures="0" skipped="7" tests="162" time="1.9">
+</testsuite>
+</testsuites>
+"""
+
+_JUNIT_WITH_FAILURES = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+<testsuite name="pytest" errors="1" failures="2" skipped="7" tests="162" time="1.9">
+</testsuite>
+</testsuites>
+"""
+
+
+def test_parse_actual_counts_from_junit(tmp_path):
+    junit_file = tmp_path / "junit.xml"
+    junit_file.write_text(_JUNIT_MATCH, encoding="utf-8")
+    actual = check_readme_counts.parse_actual_counts(junit_file)
+    assert actual == check_readme_counts.Counts(total=162, passed=155, skipped=7)
+
+
+def test_parse_actual_counts_subtracts_errors_and_failures(tmp_path):
+    junit_file = tmp_path / "junit.xml"
+    junit_file.write_text(_JUNIT_WITH_FAILURES, encoding="utf-8")
+    actual = check_readme_counts.parse_actual_counts(junit_file)
+    # 162 total - 7 skipped - 2 failures - 1 error = 152 passed
+    assert actual == check_readme_counts.Counts(total=162, passed=152, skipped=7)
+
+
+# ---------------------------------------------------------------------------
+# compare -- the gate's pass/fail decision
+# ---------------------------------------------------------------------------
+
+def test_compare_match_passes():
+    claimed = check_readme_counts.Counts(total=162, passed=155, skipped=7)
+    actual = check_readme_counts.Counts(total=162, passed=155, skipped=7)
+    ok, message = check_readme_counts.compare(claimed, actual)
+    assert ok is True
+    assert "match" in message.lower()
+
+
+def test_compare_drift_fails():
+    claimed = check_readme_counts.Counts(total=162, passed=155, skipped=7)
+    actual = check_readme_counts.Counts(total=170, passed=163, skipped=7)
+    ok, message = check_readme_counts.compare(claimed, actual)
+    assert ok is False
+    assert "162" in message and "170" in message
+
+
+def test_compare_missing_claim_fails():
+    ok, message = check_readme_counts.compare(None, check_readme_counts.Counts(total=162, passed=155, skipped=7))
+    assert ok is False
+    assert "could not find" in message.lower() or "no claim" in message.lower()
+
+
+# ---------------------------------------------------------------------------
+# main() end-to-end against real fixture files on disk
+# ---------------------------------------------------------------------------
+
+def test_main_exits_zero_on_match(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "python -m pytest -q     # 162 tests (155 passing, 7 self-audit skip without the env var below)\n",
+        encoding="utf-8",
+    )
+    junit = tmp_path / "junit.xml"
+    junit.write_text(_JUNIT_MATCH, encoding="utf-8")
+
+    rc = check_readme_counts.main(["--readme", str(readme), "--junit-xml", str(junit)])
+    assert rc == 0
+
+
+def test_main_exits_nonzero_on_drift(tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "python -m pytest -q     # 999 tests (900 passing, 7 self-audit skip without the env var below)\n",
+        encoding="utf-8",
+    )
+    junit = tmp_path / "junit.xml"
+    junit.write_text(_JUNIT_MATCH, encoding="utf-8")
+
+    rc = check_readme_counts.main(["--readme", str(readme), "--junit-xml", str(junit)])
+    assert rc != 0
+
+
+def test_main_exits_nonzero_on_missing_claim(tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text("Nothing about test counts here.\n", encoding="utf-8")
+    junit = tmp_path / "junit.xml"
+    junit.write_text(_JUNIT_MATCH, encoding="utf-8")
+
+    rc = check_readme_counts.main(["--readme", str(readme), "--junit-xml", str(junit)])
+    assert rc != 0
