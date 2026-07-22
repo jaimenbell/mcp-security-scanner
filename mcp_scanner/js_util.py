@@ -29,10 +29,6 @@ import re
 
 JS_SUFFIXES = {".js", ".mjs", ".ts"}
 
-# A '//' preceded by whitespace is a trailing comment; one glued to other
-# characters (e.g. the '//' in 'http://...') is left alone.
-_LINE_COMMENT_TAIL = re.compile(r"(?<=\s)//.*$")
-
 
 def is_comment_line(line: str) -> bool:
     """True for a whole-line '//' comment or a '/* ... */' block line."""
@@ -42,9 +38,47 @@ def is_comment_line(line: str) -> bool:
     return s.startswith("//") or s.startswith("/*") or s.startswith("*")
 
 
+def _find_line_comment_start(line: str) -> int:
+    """Index of a trailing '// comment''s opening slash, string-aware, or
+    -1 if there isn't one.
+
+    A '//' preceded by whitespace is a trailing comment; one glued to other
+    characters (e.g. the '//' in 'http://...') is left alone -- UNLESS
+    either '//' sits inside a string/template literal, in which case it is
+    never a comment regardless of what precedes it (P1a fix: the previous
+    plain regex approach had no notion of string literals, so
+    ``console.log("audit // trail"); exec(cmd)`` had everything from the
+    ``// `` inside the string onward deleted, including the real code after
+    the string literal closed)."""
+    in_str: str | None = None
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c in "'\"`":
+            in_str = c
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and line[i + 1] == "/" and i > 0 and line[i - 1].isspace():
+            return i
+        i += 1
+    return -1
+
+
 def code_part(line: str) -> str:
-    """The line with any trailing '// comment' stripped (URLs untouched)."""
-    return _LINE_COMMENT_TAIL.sub("", line)
+    """The line with any trailing '// comment' stripped (URLs and string
+    literal contents -- including one that itself contains '//' -- untouched)."""
+    idx = _find_line_comment_start(line)
+    if idx == -1:
+        return line
+    return line[:idx]
 
 
 def first_call_arg(text: str, open_paren_idx: int) -> str:

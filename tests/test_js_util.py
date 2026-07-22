@@ -19,6 +19,20 @@ def test_code_part_strips_trailing_comment_but_not_url():
     assert code_part(line) == line
 
 
+def test_code_part_preserves_double_slash_inside_string_literal():
+    # P1a regression: a '//' inside a string literal must never be treated
+    # as a comment tail -- the sink call after it must survive.
+    line = 'console.log("audit // trail"); exec(cmd)'
+    assert code_part(line) == line
+
+
+def test_code_part_preserves_secret_arg_after_string_containing_slash_slash():
+    # P1a regression: the same bug silently dropped a secret-named argument
+    # that came after a "// "-bearing string literal.
+    line = 'logger.log("Debug info // details", password)'
+    assert code_part(line) == line
+
+
 def test_first_call_arg_balances_nested_parens_and_strings():
     text = "fetch(buildUrl(a, b), { method: 'GET' })"
     idx = text.index("(")
