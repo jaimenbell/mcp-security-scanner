@@ -69,9 +69,8 @@ What's still out: a third taint hop and cross-repo flow, sanitizer-aware
 propagation, and full JS/TS AST parity (today's JS/TS coverage is
 string-aware regex heuristics with documented gaps -- see `README.md`'s
 "Known JS/TS regex-heuristic gaps" section for the specifics, e.g.
-optional-chaining `eval`, a `return {...secret}` spread shape, and
-`.jsx`/`.tsx`/`.cjs` files not yet collected). (See `PRODUCT.md` in the
-repo for the full remaining-gap list.)
+optional-chaining `eval` and a `return {...secret}` spread shape). (See
+`PRODUCT.md` in the repo for the full remaining-gap list.)
 
 ## Packages
 
