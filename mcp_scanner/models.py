@@ -46,6 +46,24 @@ class Confidence(str, Enum):
     LOW = "low"        # heuristic / worth-a-look, easily a false positive
 
 
+class Reachability(str, Enum):
+    """Whether a finding sits on code reachable from a registered MCP tool.
+
+    Computed by a post-detector pass (``reachability.py``) using a same-file
+    AST call-graph plus best-effort cross-file import following. It never
+    drops a finding — it only *labels* it and nudges confidence up or down, in
+    keeping with the scanner's deliberate over-flag philosophy.
+    """
+
+    REACHABLE = "reachable"                # inside a registered tool handler,
+                                           # or a function transitively called
+                                           # from one
+    UNREACHABLE = "unreachable-by-tools"   # no call path from any registered
+                                           # tool reaches this code
+    UNKNOWN = "unknown"                    # parse/scope limits, no tools
+                                           # registered, or non-Python surface
+
+
 @dataclass(frozen=True)
 class Finding:
     """A single detected issue at a source location."""
@@ -59,11 +77,15 @@ class Finding:
     detail: str              # what was found
     remediation: str         # what to do about it
     snippet: str = ""        # optional offending source line, trimmed
+    # Set by the post-detector reachability pass; UNKNOWN until then, so every
+    # existing detector constructor stays valid without change.
+    reachability: Reachability = Reachability.UNKNOWN
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["severity"] = self.severity.value
         d["confidence"] = self.confidence.value
+        d["reachability"] = self.reachability.value
         return d
 
 

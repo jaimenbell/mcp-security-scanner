@@ -77,7 +77,8 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 
 ## Honest capability boundary
 
-- **Static only.** No dynamic analysis, no taint tracking across function boundaries, no cross-file dataflow. Reachability is inferred from same-file heuristics.
+- **Manifest-aware reachability (built 2026-07-21).** After the detectors run, the scanner discovers the registered MCP tools (`@mcp.tool()` / `server.tool(...)` registrations and any `server.json` manifest) and walks a static call-graph to label every finding **reachable** (inside a tool handler or a function transitively called from one), **unreachable-by-tools** (no call path from any registered tool), or **unknown**. `reachable` raises a finding's confidence; `unreachable` lowers it; a finding is **never dropped** on this basis (the over-flag philosophy stands). Stated limits: the same-file call-graph is exact; cross-file is best-effort by function name (not a resolved import graph); module-level code, non-Python (JS/TS/YAML/shell) findings, and repos with no discoverable tools are labelled `unknown` rather than guessed. It labels *reachability*, not the individual tainted value along the path — full cross-file taint tracking is still out of scope.
+- **Static only.** No dynamic analysis. Reachability is inferred from the static call-graph above, not observed at runtime.
 - **Confidence is load-bearing.** `low` findings are "a human should glance at this," and produce false positives by design (e.g. a variable file path in a test file). They are P2/P3 and never break a clean bill.
 - **Not a git-history scanner.** The secret detector reads the tracked working tree, not full history. Pair it with `gitleaks` for history.
 - **Language coverage.** Deep for Python (AST-based); regex-level for Jinja templates and JS/TS.
@@ -85,10 +86,10 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 75 tests (68 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
+python -m pytest -q     # 89 tests (82 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the reachability-grading matrix + the self-audit proof + client-report renderer
 ```
 
-The self-audit tests (7 of the 55) require `MCP_SCANNER_FLEET_ROOT` to be set
+The self-audit tests (7 of the 89) require `MCP_SCANNER_FLEET_ROOT` to be set
 and pointed at real MCP server repos to scan; they skip cleanly if it's
 unset (e.g. in a fresh clone or CI on another machine). See
 [ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.
