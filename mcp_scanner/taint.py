@@ -54,9 +54,12 @@ _DATAFLOW_CLASSES = {
     "path-traversal",
 }
 
-# Whether Slice-2 cross-file (one-import-hop) propagation is active. Slice 1
-# ships same-file only; Slice 2 flips this on.
-_CROSS_FILE = False
+# Cross-file (one-direct-import-hop) propagation. Same-file dataflow is
+# transitive; from a tool-reachable function we follow ONE import hop into
+# another same-repo module and propagate through the callee's params to its
+# sinks. No second hop, no decorator-transform tracking, no dynamic dispatch
+# (getattr / *args / **kwargs re-binding) -- all stated as honest limits.
+_CROSS_FILE = True
 
 
 # --------------------------------------------------------------------- #
