@@ -70,7 +70,7 @@ class Taint(str, Enum):
     Computed by a post-detector pass (``taint.py``) that seeds every registered
     tool handler's parameters as taint sources and propagates them through
     assignments, f-strings/concat/format, containers, and same-repo function
-    calls (same-file transitively, one import hop cross-file) into the
+    calls (same-file transitively, up to two import hops cross-file) into the
     param-injection detector's dangerous sinks. Like the reachability grade it
     only *labels* a finding and nudges confidence up (TAINTED) or down
     (UNTAINTED) -- it NEVER drops a finding (the over-flag philosophy stands).
