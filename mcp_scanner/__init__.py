@@ -7,13 +7,13 @@ auth/network posture gaps, and secret handling.
 
 from __future__ import annotations
 
-from .models import Finding, Severity, Confidence, ScanResult
+from .models import Finding, Severity, Confidence, Reachability, Taint, ScanResult
 from .scanner import scan_repo, build_context
 from .reporting import render_markdown, render_json
 
 __version__ = "0.1.0"
 __all__ = [
-    "Finding", "Severity", "Confidence", "ScanResult",
+    "Finding", "Severity", "Confidence", "Reachability", "Taint", "ScanResult",
     "scan_repo", "build_context", "render_markdown", "render_json",
     "__version__",
 ]

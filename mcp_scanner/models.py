@@ -64,6 +64,27 @@ class Reachability(str, Enum):
                                            # registered, or non-Python surface
 
 
+class Taint(str, Enum):
+    """Whether TOOL-PARAMETER data actually flows into a dangerous sink.
+
+    Computed by a post-detector pass (``taint.py``) that seeds every registered
+    tool handler's parameters as taint sources and propagates them through
+    assignments, f-strings/concat/format, containers, and same-repo function
+    calls (same-file transitively, one import hop cross-file) into the
+    param-injection detector's dangerous sinks. Like the reachability grade it
+    only *labels* a finding and nudges confidence up (TAINTED) or down
+    (UNTAINTED) -- it NEVER drops a finding (the over-flag philosophy stands).
+    """
+
+    TAINTED = "tainted"        # a tool parameter's value provably reaches the
+                               # dangerous argument of this sink
+    UNTAINTED = "untainted"    # the sink is in tool-reachable code we analyzed,
+                               # but no tool parameter reaches its dangerous arg
+                               # (constant / other source) -- lowered, not dropped
+    UNKNOWN = "unknown"        # not a dataflow-shaped finding, module-level /
+                               # unreachable code, no tools, or non-Python surface
+
+
 @dataclass(frozen=True)
 class Finding:
     """A single detected issue at a source location."""
@@ -80,12 +101,16 @@ class Finding:
     # Set by the post-detector reachability pass; UNKNOWN until then, so every
     # existing detector constructor stays valid without change.
     reachability: Reachability = Reachability.UNKNOWN
+    # Set by the post-detector taint pass; UNKNOWN until then (and for every
+    # non-dataflow-shaped finding), so every existing constructor stays valid.
+    taint: Taint = Taint.UNKNOWN
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["severity"] = self.severity.value
         d["confidence"] = self.confidence.value
         d["reachability"] = self.reachability.value
+        d["taint"] = self.taint.value
         return d
 
 
