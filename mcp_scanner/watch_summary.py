@@ -1,7 +1,7 @@
 """Counts-only watch summary -- the ONLY payload the Managed MCP Watch
 Action is allowed to transmit off a client machine.
 
-Egress contract (spec docs/SAAS-TIER-SPEC.md, gate G5):
+Egress contract (counts-only allowlist, opt-in, off by default):
 
   The payload contains counts and identity metadata ONLY:
   repo name, commit SHA, scanner version, timestamp, files-scanned count,
