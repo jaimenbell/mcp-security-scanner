@@ -85,7 +85,7 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 68 tests (61 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
+python -m pytest -q     # 75 tests (68 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
 ```
 
 The self-audit tests (7 of the 55) require `MCP_SCANNER_FLEET_ROOT` to be set
