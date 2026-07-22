@@ -12,7 +12,16 @@ from .models import ScanResult
 
 # Files we parse for AST / regex. Everything else is ignored except for the
 # tracked-file secret check (which uses the git manifest, not content).
-_SCAN_SUFFIXES = {".py", ".pyw", ".j2", ".jinja", ".jinja2", ".js", ".mjs", ".ts"}
+_SCAN_SUFFIXES = {
+    ".py", ".pyw", ".j2", ".jinja", ".jinja2", ".js", ".mjs", ".ts",
+    # scheduled-job / wrapper / IaC-CI surfaces (Phase 1 depth build,
+    # 2026-07-21): cron/systemd wrappers, GitHub Actions workflows, and
+    # Windows scheduled-task/deploy scripts -- the reliability-retainer
+    # pitch's "cron, systemd, GitHub Actions, your Railway/deploy configs"
+    # promise requires the scanner to actually read these file types.
+    ".yml", ".yaml", ".ps1", ".sh", ".bash", ".bat", ".cmd",
+    ".service", ".timer",
+}
 _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
     ".mypy_cache", ".pytest_cache", "dist", "build", ".egg-info",

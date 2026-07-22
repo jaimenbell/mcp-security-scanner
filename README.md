@@ -13,7 +13,7 @@ A static security scanner for [Model Context Protocol](https://modelcontextproto
 
 ## What it scans
 
-Six detector families, each grounded in a real finding from a fleet-wide audit of production MCP servers:
+Seven detector families. The first six are grounded in a real finding from a fleet-wide audit of production MCP servers; the seventh (added 2026-07-21) covers scheduled jobs, wrappers, and IaC/CI files — cron, systemd, GitHub Actions, PowerShell/bash/batch deploy scripts:
 
 | # | Class | Detects |
 |---|---|---|
@@ -23,6 +23,7 @@ Six detector families, each grounded in a real finding from a fleet-wide audit o
 | 4 | **Secret handling** | Tracked `.env` / `*.pem` / `*.key` / keypair JSON, hardcoded secret literals (value-shape + secret-named assignments), secrets passed to log/print. |
 | 5 | **Write-tools-on-by-default / tool-scope-creep** (added 2026-07-19) | A mutating `@mcp.tool()`/`@server.tool()`-registered tool (name/verb or dangerous-sink-body heuristic, one hop through a delegated helper) with no visible gate -- decorator, env-flag opt-in, or permission check. |
 | 6 | **Secret-leak-via-tool-response** (added 2026-07-19) | An `@mcp.tool()`/`@server.tool()` function whose `return` expression hands back `os.environ`, a whole config/settings object, or a secret-named/secret-shaped value to the calling LLM. |
+| 7 | **Job hazards** (added 2026-07-21) | Scans `.yml`/`.yaml`/`.ps1`/`.sh`/`.bash`/`.bat`/`.cmd`/`.service`/`.timer` files for: over-broad credential/ACL scope (`permissions: write-all`, `icacls ... Everyone:F`, `chmod 777`, IAM `Action`/`Resource` wildcard pairs); a destructive call (`rm -rf`, `Remove-Item -Recurse -Force`, `terraform destroy`, `kubectl delete`, `git push --force`/`reset --hard`, `DROP TABLE`, `docker system prune`/`volume rm`, `schtasks /delete`, `aws s3 rm --recursive`) with no confirm-before-destroy gate (escalates to P0 when `-Confirm:$false` actively disables the built-in prompt); and success-reported-without-verification (`|| true`, a bare `; exit 0`, `continue-on-error: true`, an empty PowerShell `catch {}`). |
 
 Every finding carries **severity** (P0 critical → P3 hardening nit), **confidence** (high / medium / low), the offending `file:line`, and a concrete fix.
 
@@ -84,7 +85,7 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 55 tests (48 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
+python -m pytest -q     # 66 tests (59 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the self-audit proof + client-report renderer
 ```
 
 The self-audit tests (7 of the 55) require `MCP_SCANNER_FLEET_ROOT` to be set
