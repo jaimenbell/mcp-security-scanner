@@ -33,9 +33,12 @@ from __future__ import annotations
 
 import ast
 import re
+import tokenize
+import io
 
 from ..models import Finding, Severity, Confidence
 from ..tool_registry import _dotted, _is_tool_decorator, _declared_tool_name, extract_tool_registry
+from .. import js_util
 from .base import Detector, RepoContext, SourceFile
 
 # --- mutating-by-name heuristic ------------------------------------------
@@ -139,11 +142,33 @@ def _source_segment(f: SourceFile, node: ast.AST) -> str:
     return "\n".join(f.lines[start - 1:end])
 
 
+def _strip_py_comments(src: str) -> str:
+    """Best-effort comment-stripped copy of ``src`` so a ``# TODO: needs
+    auth_required check`` comment never counts as gate evidence (P0 fix --
+    comment text was previously indistinguishable from real gate code to the
+    ``_GATE_HINT``/``_ENV_OPT_IN`` regex search). Falls back to the original
+    text if tokenizing fails (e.g. an indented source segment -- a method
+    body sliced out on its own -- isn't independently tokenizable); that
+    fallback is no worse than the prior behavior, never better."""
+    try:
+        lines = src.splitlines(keepends=True)
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type != tokenize.COMMENT:
+                continue
+            (srow, scol), (erow, ecol) = tok.start, tok.end
+            if srow == erow and 0 < srow <= len(lines):
+                line = lines[srow - 1]
+                lines[srow - 1] = line[:scol] + line[ecol:]
+        return "".join(lines)
+    except Exception:
+        return src
+
+
 def _node_has_gate(f: SourceFile, node: ast.AST) -> bool:
     deco_src = " ".join(_unparse(d) for d in getattr(node, "decorator_list", []))
     if _GATE_HINT.search(deco_src):
         return True
-    body_src = _source_segment(f, node)
+    body_src = _strip_py_comments(_source_segment(f, node))
     return bool(_GATE_HINT.search(body_src) or _ENV_OPT_IN.search(body_src))
 
 
@@ -240,7 +265,17 @@ class ToolScopeCreepDetector(Detector):
                     regs_in_file[idx + 1].line if idx + 1 < len(regs_in_file) else len(f.lines) + 1
                 )
                 end = min(next_line - 1, start + _JS_WINDOW_MAX_LINES, len(f.lines))
-                window = "\n".join(f.lines[start - 1:end])
+                window_lines = f.lines[start - 1:end]
+                window = "\n".join(window_lines)
+                # Comment-stripped copy used ONLY for gate-hint matching (P0
+                # fix): a '// TODO: needs auth_required check' comment must
+                # never count as gate evidence. Sink matching stays on the
+                # raw window -- a sink pattern glued inside a comment is an
+                # over-flag, the direction this scanner already accepts.
+                gate_window = "\n".join(
+                    js_util.code_part(raw) for raw in window_lines
+                    if not js_util.is_comment_line(raw)
+                )
 
                 tool_label = r.name if r.name and r.name != "(inline)" else "(unnamed tool)"
                 by_name = bool(_MUTATING_VERB.match(tool_label))
@@ -248,7 +283,7 @@ class ToolScopeCreepDetector(Detector):
                 if not (by_name or sink_hit):
                     continue
 
-                gated = bool(_GATE_HINT.search(window)) or bool(_JS_ENV_OPT_IN.search(window))
+                gated = bool(_GATE_HINT.search(gate_window)) or bool(_JS_ENV_OPT_IN.search(gate_window))
                 if gated:
                     continue
 
