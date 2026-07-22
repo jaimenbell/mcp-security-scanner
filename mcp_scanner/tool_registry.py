@@ -33,6 +33,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from . import js_util
 from .detectors.base import RepoContext, SourceFile
 
 
@@ -82,7 +83,9 @@ class ToolRegistration:
 _JS_TOOL_RE = re.compile(
     r"\b[\w$]+\.tool\s*\(\s*(?:[\"'`]([^\"'`]+)[\"'`])?",
 )
-_JS_SUFFIXES = {".js", ".mjs", ".ts"}
+# Shared with js_util.JS_SUFFIXES (same set) rather than a private duplicate
+# that could silently drift from it.
+_JS_SUFFIXES = js_util.JS_SUFFIXES
 
 
 def _extract_python(f: SourceFile) -> list[ToolRegistration]:
