@@ -90,7 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        with open(args.json_file, encoding="utf-8") as fh:
+        # utf-8-sig tolerates the BOM that Windows-runner shells commonly
+        # prepend (PowerShell Out-File / redirection); plain utf-8 files
+        # are unaffected.
+        with open(args.json_file, encoding="utf-8-sig") as fh:
             scan_dict = json.load(fh)
     except OSError as e:
         print(f"error: cannot read {args.json_file}: {e}", file=sys.stderr)
