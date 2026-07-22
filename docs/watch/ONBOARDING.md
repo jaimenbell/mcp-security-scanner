@@ -66,7 +66,7 @@ ready. Nothing auto-updates underneath you.
 | `fail-on` | `P1` | Fail the build at/above this severity (`P0`, `P1`, `P2`, `P3`). Empty string = report-only mode, never fails. |
 | `client-name` | `the client` | Name printed on the report header. |
 | `report-artifact-name` | `mcp-scan-report` | Name of the uploaded artifact in YOUR artifact store. |
-| `counts-webhook-url` | empty (off) | Opt-in: POST a counts-only summary (no code, no paths, no finding text) to this URL after each scan. Leave empty to transmit nothing. |
+| `counts-webhook-url` | empty (off) | Opt-in: POST a counts-only summary (no code, no paths, no finding text) to this URL after each scan. Leave empty to transmit nothing. **If you enable it, pass the URL via a repository secret** (`counts-webhook-url: ${{ secrets.MCP_WATCH_WEBHOOK }}`) — webhook URLs often embed access tokens, and a secret keeps the URL masked in workflow logs. |
 | `python-version` | `3.11` | Python used to run the scanner. |
 
 ### Action outputs

@@ -90,7 +90,7 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 173 tests (166 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer + the CI README count-verification gate's own unit tests
+python -m pytest -q     # 202 tests (195 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer + the CI README count-verification gate's own unit tests
 ```
 
 CI (`.github/workflows/ci.yml`) runs this suite on every push/PR and fails the

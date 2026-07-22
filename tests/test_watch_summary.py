@@ -69,7 +69,14 @@ def test_payload_contains_no_source_material(vuln_scan_dict):
         for field in ("file", "snippet", "title", "detail", "remediation"):
             value = f.get(field, "")
             if value:
-                assert value not in serialized, (
+                # Compare escaped-to-escaped: a raw Windows path (C:\x) never
+                # substring-matches its json.dumps form (C:\\x), so a naive
+                # `value not in serialized` false-PASSes on backslash paths
+                # (found by the 2026-07-22 egress review). json.dumps(value)
+                # [1:-1] is the value exactly as it would appear inside the
+                # serialized payload.
+                escaped = json.dumps(value)[1:-1]
+                assert escaped not in serialized, (
                     f"finding {field!r} leaked into the counts payload: "
                     f"{value!r}"
                 )
@@ -100,7 +107,10 @@ def test_payload_omits_scan_target_path(vuln_scan_dict):
         build_counts_payload(vuln_scan_dict, repo="acme/mcp-server",
                              commit="abc1234")
     )
-    assert vuln_scan_dict["target"] not in serialized
+    # Escaped-to-escaped comparison -- see the note in
+    # test_payload_contains_no_source_material (Windows backslash paths
+    # double-escape under json.dumps and evade a raw substring check).
+    assert json.dumps(vuln_scan_dict["target"])[1:-1] not in serialized
     assert "target" not in json.loads(serialized)
 
 
