@@ -105,6 +105,25 @@ def test_no_tools_grades_all_taint_unknown_and_preserves_confidence():
 # --------------------------------------------------------------------- #
 # Non-dataflow finding classes are never taint-graded
 # --------------------------------------------------------------------- #
+# --------------------------------------------------------------------- #
+# Surfacing -- the taint grade appears in both report renderers
+# --------------------------------------------------------------------- #
+def test_client_report_has_tainted_column(fixtures_dir):
+    from mcp_scanner.client_report import render_client_report
+    r = scan_repo(str(fixtures_dir / "taint"), [ParamInjectionDetector()])
+    out = render_client_report(r, client_name="Acme")
+    assert "Tainted?" in out          # column header
+    assert "| tainted |" in out       # at least one tainted cell rendered
+    assert "_Tainted?_" in out        # the legend note
+
+
+def test_terse_markdown_includes_taint(fixtures_dir):
+    from mcp_scanner.reporting import render_markdown
+    r = scan_repo(str(fixtures_dir / "taint"), [ParamInjectionDetector()])
+    out = render_markdown(r)
+    assert "taint: tainted" in out
+
+
 def test_non_dataflow_class_is_taint_unknown(fixtures_dir):
     # The auth/secret/etc. detectors are not dataflow-shaped; scan the vuln_auth
     # fixture with all detectors and confirm any non-param-injection finding is

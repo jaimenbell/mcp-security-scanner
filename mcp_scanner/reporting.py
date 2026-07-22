@@ -60,6 +60,7 @@ def render_markdown(result: ScanResult) -> str:
             lines.append(f"### {i}. [{f.severity.value}] {f.title}  \n"
                          f"*{f.severity.label} | confidence: {f.confidence.value} | "
                          f"reachable: {f.reachability.value} | "
+                         f"taint: {f.taint.value} | "
                          f"class: `{f.vuln_class}` | {loc}*")
             lines.append("")
             lines.append(f"- **What:** {f.detail}")
