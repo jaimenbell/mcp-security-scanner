@@ -16,6 +16,7 @@ from .taint import grade_result as grade_taint
 # tracked-file secret check (which uses the git manifest, not content).
 _SCAN_SUFFIXES = {
     ".py", ".pyw", ".j2", ".jinja", ".jinja2", ".js", ".mjs", ".cjs", ".ts",
+    ".jsx", ".tsx",
     # scheduled-job / wrapper / IaC-CI surfaces (Phase 1 depth build,
     # 2026-07-21): cron/systemd wrappers, GitHub Actions workflows, and
     # Windows scheduled-task/deploy scripts -- the reliability-retainer
