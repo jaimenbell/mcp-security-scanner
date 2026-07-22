@@ -58,6 +58,64 @@ _JS_RETURN_WHOLE_OBJECT_NAME = re.compile(
 _JS_BARE_RETURN_NAME = re.compile(r"\breturn\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*;")
 _JS_OBJECT_KEY = re.compile(r"^\s*[\"']?([A-Za-z_$][A-Za-z0-9_$]*)[\"']?\s*:\s*(.+?),?\s*$")
 
+# P2-honesty fix: a compressed one-line object literal (`return {a: 1};`)
+# opens and closes its brace on the same physical line -- the multi-line
+# brace-depth state machine below only ever inspects the FOLLOWING lines for
+# keys, so this shape was silently never decomposed (0 findings) despite an
+# inline comment previously (and falsely) claiming it was already covered.
+_JS_SAME_LINE_RETURN_OBJECT = re.compile(r"\breturn\s*\{(.*)\}\s*;?\s*$")
+_JS_FIELD_KEY = re.compile(r"^[\"']?([A-Za-z_$][A-Za-z0-9_$]*)[\"']?\s*:\s*(.+)$", re.DOTALL)
+
+
+def _split_top_level_commas(s: str) -> list[str]:
+    """Split ``s`` on commas that are not inside a nested (), [], {} or a
+    string/template literal -- so a nested object/array value or a comma
+    inside a string doesn't get cut mid-field."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    in_str: str | None = None
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c in "'\"`":
+            in_str = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+        i += 1
+    parts.append(s[start:])
+    return parts
+
+
+def _same_line_return_fields(line: str) -> list[tuple[str, str]]:
+    """(key, value-text) pairs for a `return { ... };` object literal that
+    opens and closes entirely on one line."""
+    m = _JS_SAME_LINE_RETURN_OBJECT.search(line)
+    if not m:
+        return []
+    out: list[tuple[str, str]] = []
+    for part in _split_top_level_commas(m.group(1)):
+        part = part.strip()
+        if not part:
+            continue
+        km = _JS_FIELD_KEY.match(part)
+        if km:
+            out.append((km.group(1), km.group(2).strip()))
+    return out
+
 
 def _dotted(node: ast.AST) -> str:
     if isinstance(node, ast.Attribute):
@@ -240,7 +298,15 @@ class SecretLeakResponseDetector(Detector):
         count and the key/value extraction below deliberately use different
         text: braces are counted on the string-stripped copy, but the key
         and value themselves are still read from the original line so a
-        real value like `apiKey: "sk-..."` isn't corrupted."""
+        real value like `apiKey: "sk-..."` isn't corrupted.
+
+        A compressed one-line object literal (`return {a: 1, b: 2};`, opens
+        and closes its brace on the same physical line) is decomposed via
+        `_same_line_return_fields` instead of entering the multi-line state
+        machine (P2-honesty fix, 2026-07-22): a prior version of this
+        docstring claimed the whole-object/process.env checks elsewhere in
+        this file already covered this shape -- they don't (neither matches
+        a compound object literal), so it was silently 0 findings."""
         out: list[tuple[int, str, str]] = []
         depth = 0
         active = False
@@ -248,14 +314,19 @@ class SecretLeakResponseDetector(Detector):
             if js_util.is_comment_line(raw_line):
                 continue
             line = js_util.code_part(raw_line)
-            brace_only = _JS_STRING_LITERAL.sub("", line)
             if not active:
+                same_line = _same_line_return_fields(line)
+                if same_line:
+                    out.extend((i, k, v) for k, v in same_line)
+                    continue
+                brace_only = _JS_STRING_LITERAL.sub("", line)
                 if re.search(r"\breturn\s*\{", brace_only):
                     active = True
                     depth = brace_only.count("{") - brace_only.count("}")
                     if depth <= 0:
                         active = False
                 continue
+            brace_only = _JS_STRING_LITERAL.sub("", line)
             depth += brace_only.count("{") - brace_only.count("}")
             km = _JS_OBJECT_KEY.match(line)
             if km:
