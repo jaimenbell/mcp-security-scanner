@@ -18,8 +18,10 @@ All AST-based to keep the false-positive rate low.
 from __future__ import annotations
 
 import ast
+import re
 
 from ..models import Finding, Severity, Confidence
+from .. import js_util
 from .base import Detector, RepoContext, SourceFile
 
 _CONTAINMENT_HINTS = (
@@ -29,6 +31,27 @@ _CONTAINMENT_HINTS = (
 _ALLOWLIST_HINTS = (
     "allowlist", "allow_list", "whitelist", "ALLOWED", "allowed_hosts",
     "allowed_domains", "urlparse", "hostname", "netloc",
+)
+
+# --- JS/TS parity sinks --------------------------------------------------
+# Regex/line-based (see js_util's honesty note) -- there is no JS/TS AST in
+# this scanner. Mirrors the same sink classes the Python AST pass checks:
+# shell-injection, code-eval, unsafe-deserialization, ssrf, path-traversal.
+_JS_CHILD_PROCESS_IMPORT = re.compile(
+    r"""require\(\s*['"]child_process['"]\s*\)|from\s+['"]child_process['"]"""
+)
+_JS_EXEC_CALL = re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")
+_JS_SPAWN_EXECFILE_CALL = re.compile(r"\b(?:child_process\.)?(?:spawn|execFile)(?:Sync)?\s*\(")
+_JS_SHELL_TRUE = re.compile(r"shell\s*:\s*true", re.IGNORECASE)
+_JS_EVAL_CALL = re.compile(r"\beval\s*\(")
+_JS_NEW_FUNCTION = re.compile(r"\bnew\s+Function\s*\(")
+_JS_YAML_LOAD = re.compile(r"\byaml\.load\s*\(")
+_JS_YAML_SAFE_SCHEMA = re.compile(r"JSON_SCHEMA|SAFE_SCHEMA|FAILSAFE_SCHEMA")
+_JS_FETCH_CALL = re.compile(r"\bfetch\s*\(")
+_JS_AXIOS_CALL = re.compile(r"\baxios\.(?:get|post|put|delete|patch|request)\s*\(")
+_JS_HTTP_GET_CALL = re.compile(r"\b(?:http|https)\.get\s*\(")
+_JS_FS_PATH_CALL = re.compile(
+    r"\bfs\.(?:readFile|writeFile|appendFile|unlink)(?:Sync)?\s*\("
 )
 
 
@@ -52,6 +75,9 @@ class ParamInjectionDetector(Detector):
     def run(self, ctx: RepoContext) -> list[Finding]:
         findings: list[Finding] = []
         for f in ctx.files:
+            if f.suffix in js_util.JS_SUFFIXES:
+                findings.extend(self._scan_js(f))
+                continue
             if f.tree is None:
                 continue
             text = f.text
@@ -63,6 +89,108 @@ class ParamInjectionDetector(Detector):
                         self._check_call(node, f, has_containment, has_allowlist)
                     )
         return findings
+
+    # --- JS/TS: line-based sink regex (no AST available) -----------------
+    def _scan_js(self, f: SourceFile) -> list[Finding]:
+        out: list[Finding] = []
+        text = f.text
+        has_child_process = bool(_JS_CHILD_PROCESS_IMPORT.search(text))
+        has_containment = any(h in text for h in _CONTAINMENT_HINTS)
+        has_allowlist = any(h in text for h in _ALLOWLIST_HINTS)
+
+        for i, raw_line in enumerate(f.lines, start=1):
+            if js_util.is_comment_line(raw_line):
+                continue
+            line = js_util.code_part(raw_line)
+
+            if has_child_process:
+                if _JS_EXEC_CALL.search(line):
+                    out.append(self._f(
+                        "shell-injection", "child_process.exec(Sync) invocation",
+                        Severity.P1, Confidence.HIGH, f, i,
+                        "child_process.exec/execSync always runs its command string "
+                        "through a shell; any tool-controlled substring becomes shell "
+                        "metacharacters.",
+                        "Use execFile/spawn with an argv array (shell:false, the "
+                        "default). If a shell is unavoidable, escape every "
+                        "interpolated value and reject metacharacters.",
+                    ))
+                m = _JS_SPAWN_EXECFILE_CALL.search(line)
+                if m and _JS_SHELL_TRUE.search(line):
+                    out.append(self._f(
+                        "shell-injection", "spawn/execFile called with shell:true",
+                        Severity.P1, Confidence.HIGH, f, i,
+                        "spawn/execFile with shell:true runs its argument through a "
+                        "shell; any tool-controlled substring becomes shell "
+                        "metacharacters.",
+                        "Drop shell:true and pass argv as a list.",
+                    ))
+
+            me = _JS_EVAL_CALL.search(line)
+            if me:
+                arg = js_util.first_call_arg(line, me.end() - 1)
+                if not js_util.is_const_arg(arg):
+                    out.append(self._f(
+                        "code-eval", "eval() on a non-constant value",
+                        Severity.P0, Confidence.HIGH, f, i,
+                        "eval() executes arbitrary JavaScript from its argument.",
+                        "Remove eval(). Parse structured input explicitly "
+                        "(JSON.parse for JSON, a real parser otherwise).",
+                    ))
+
+            if _JS_NEW_FUNCTION.search(line):
+                out.append(self._f(
+                    "code-eval", "new Function(...) constructs code from its argument",
+                    Severity.P0, Confidence.HIGH, f, i,
+                    "The Function constructor compiles its string argument as "
+                    "JavaScript -- the same class of risk as eval().",
+                    "Remove the dynamic Function constructor; parse structured "
+                    "input explicitly instead of compiling code from it.",
+                ))
+
+            my = _JS_YAML_LOAD.search(line)
+            if my and not _JS_YAML_SAFE_SCHEMA.search(line):
+                out.append(self._f(
+                    "unsafe-deserialization", "yaml.load without a safe schema",
+                    Severity.P1, Confidence.MEDIUM, f, i,
+                    "js-yaml's yaml.load with the default schema can construct "
+                    "arbitrary JS types from the input.",
+                    "Pass {schema: JSON_SCHEMA} (or the older yaml.safeLoad).",
+                ))
+
+            for pat in (_JS_FETCH_CALL, _JS_AXIOS_CALL, _JS_HTTP_GET_CALL):
+                m3 = pat.search(line)
+                if not m3:
+                    continue
+                arg = js_util.first_call_arg(line, m3.end() - 1)
+                if arg and not js_util.is_const_arg(arg) and not has_allowlist:
+                    out.append(self._f(
+                        "ssrf",
+                        "HTTP fetch of a caller-influenced URL with no host allowlist",
+                        Severity.P2, Confidence.MEDIUM, f, i,
+                        "A tool that fetches a caller-supplied URL can be pointed "
+                        "at internal/metadata endpoints (SSRF).",
+                        "Validate the URL against a host allowlist; reject "
+                        "non-http(s) schemes and private/link-local IP ranges "
+                        "before fetching.",
+                    ))
+                break
+
+            mfs = _JS_FS_PATH_CALL.search(line)
+            if mfs:
+                arg = js_util.first_call_arg(line, mfs.end() - 1)
+                if arg and not js_util.is_const_arg(arg) and not has_containment:
+                    out.append(self._f(
+                        "path-traversal",
+                        "file op on a non-constant path without containment",
+                        Severity.P2, Confidence.LOW, f, i,
+                        "A tool that opens a caller-derived path with no "
+                        "confinement (path.resolve + a containment check) may "
+                        "allow ../ traversal outside its intended directory.",
+                        "Resolve the path and assert it stays under an allowed "
+                        "base directory before opening.",
+                    ))
+        return out
 
     def _check_call(
         self, node: ast.Call, f: SourceFile, has_containment: bool, has_allowlist: bool
