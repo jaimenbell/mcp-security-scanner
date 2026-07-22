@@ -13,3 +13,4 @@ build/
 # Internal strategy/outreach drafts -- never publish (public repo)
 docs/GTM-MANAGED-WATCH.md
 staged/scan-tier-outreach-DRAFT-*.md
+docs/SAAS-TIER-SPEC.md
