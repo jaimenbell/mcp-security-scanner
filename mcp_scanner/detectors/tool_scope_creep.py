@@ -35,7 +35,7 @@ import ast
 import re
 
 from ..models import Finding, Severity, Confidence
-from ..tool_registry import _dotted, _is_tool_decorator, _declared_tool_name
+from ..tool_registry import _dotted, _is_tool_decorator, _declared_tool_name, extract_tool_registry
 from .base import Detector, RepoContext, SourceFile
 
 # --- mutating-by-name heuristic ------------------------------------------
@@ -68,6 +68,27 @@ _ENV_OPT_IN = re.compile(
     r"(ENABLE|ALLOW|PERMIT|OPT_IN)[A-Z0-9_]*[\"']",
     re.IGNORECASE,
 )
+
+# --- JS/TS parity ----------------------------------------------------------
+# No AST for JS/TS in this scanner (see js_util). Tool bodies aren't
+# delimited without a parser, so the "body" a JS tool is graded on is a
+# capped line window from its registration to the next registration (or 40
+# lines, whichever is shorter) -- a same-file, no-real-scope heuristic,
+# consistent with this detector's existing one-hop/name-based honesty note.
+_JS_MUTATING_SINK = re.compile(
+    r"\b(?:child_process\.)?(?:exec|execSync|spawn|execFile)(?:Sync)?\s*\(|"
+    r"\bfs\.(?:unlink|rmdir|rm|writeFile|appendFile)(?:Sync)?\s*\(|"
+    r"\baxios\.(?:post|put|delete|patch)\s*\(|"
+    r"\bfetch\s*\([^)]*method\s*:\s*[\"'](?:POST|PUT|DELETE|PATCH)[\"']|"
+    r"\bprocess\.kill\s*\(|"
+    r"\bsendMail\s*\(",
+    re.IGNORECASE,
+)
+_JS_ENV_OPT_IN = re.compile(
+    r"process\.env(?:\.|\[)\s*[\"']?[A-Z0-9_]*(ENABLE|ALLOW|PERMIT|OPT_IN)[A-Z0-9_]*",
+    re.IGNORECASE,
+)
+_JS_WINDOW_MAX_LINES = 40
 
 
 def _unparse(node: ast.AST) -> str:
@@ -196,7 +217,66 @@ class ToolScopeCreepDetector(Detector):
                     ),
                     snippet=f.line_at(node.lineno),
                 ))
+        findings.extend(self._scan_js(ctx))
         return findings
+
+    # --- JS/TS: line-window sink/gate regex (no AST available) -----------
+    def _scan_js(self, ctx: RepoContext) -> list[Finding]:
+        regs = [r for r in extract_tool_registry(ctx) if r.source == "js-regex"]
+        if not regs:
+            return []
+        by_file: dict[str, list] = {}
+        for r in regs:
+            by_file.setdefault(r.file, []).append(r)
+
+        out: list[Finding] = []
+        for f in ctx.files:
+            if f.rel not in by_file:
+                continue
+            regs_in_file = sorted(by_file[f.rel], key=lambda r: r.line)
+            for idx, r in enumerate(regs_in_file):
+                start = r.line
+                next_line = (
+                    regs_in_file[idx + 1].line if idx + 1 < len(regs_in_file) else len(f.lines) + 1
+                )
+                end = min(next_line - 1, start + _JS_WINDOW_MAX_LINES, len(f.lines))
+                window = "\n".join(f.lines[start - 1:end])
+
+                tool_label = r.name if r.name and r.name != "(inline)" else "(unnamed tool)"
+                by_name = bool(_MUTATING_VERB.match(tool_label))
+                sink_hit = bool(_JS_MUTATING_SINK.search(window))
+                if not (by_name or sink_hit):
+                    continue
+
+                gated = bool(_GATE_HINT.search(window)) or bool(_JS_ENV_OPT_IN.search(window))
+                if gated:
+                    continue
+
+                sev = Severity.P1 if sink_hit else Severity.P2
+                conf = Confidence.HIGH if sink_hit else Confidence.MEDIUM
+                out.append(Finding(
+                    vuln_class=self.name,
+                    title=f"Mutating tool '{tool_label}' has no visible permission gate",
+                    severity=sev, confidence=conf,
+                    file=f.rel, line=r.line,
+                    detail=(
+                        f"'{tool_label}' is registered as an MCP tool (JS/TS "
+                        f"regex-detected) and looks mutating "
+                        f"({'a dangerous sink appears in its body window' if sink_hit else 'by its name'}), "
+                        "but no permission-group gate or env-flag opt-in was found in "
+                        "the line window from its registration to the next tool "
+                        "registration (or 40 lines, whichever is shorter -- there is "
+                        "no JS/TS AST in this scanner to delimit the real function "
+                        "body)."
+                    ),
+                    remediation=(
+                        "Gate every mutating tool behind an explicit, default-OFF "
+                        "env flag and/or permission-group check enforced before any "
+                        "side effect runs."
+                    ),
+                    snippet=f.line_at(r.line),
+                ))
+        return out
 
     # --- helpers ------------------------------------------------------
     def _inspect_body(self, node: ast.AST, func_index: dict, gated_names: set) -> tuple[bool, bool]:
