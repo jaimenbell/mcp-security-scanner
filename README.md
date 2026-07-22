@@ -90,7 +90,7 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 python -m pytest -q     # 108 tests (101 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures + the reachability-grading matrix + the tool-parameter taint-tracking matrix (intra-file + cross-file) + the self-audit proof + client-report renderer
 ```
 
-The self-audit tests (7 of the 89) require `MCP_SCANNER_FLEET_ROOT` to be set
+The self-audit tests (7 of the 108) require `MCP_SCANNER_FLEET_ROOT` to be set
 and pointed at real MCP server repos to scan; they skip cleanly if it's
 unset (e.g. in a fresh clone or CI on another machine). See
 [ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.
