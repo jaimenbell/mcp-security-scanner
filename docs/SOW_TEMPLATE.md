@@ -2,7 +2,7 @@
 title: "Statement of Work -- One-Shot MCP Security Audit (fill-in template)"
 type: sow-template
 audience: client-facing (fill the [brackets] and send)
-version: 2026-07-16
+version: 2026-07-22
 spec: "mcp-security-scanner-retainer-spec-2026-07-16.md §2-3"
 capability_boundary: "the Capability statement below is quoted VERBATIM from mcp_scanner/client_report.py's CAPABILITY_STATEMENT"
 tags: [mcp-security-scanner, sow, template, one-shot-audit]
@@ -30,7 +30,9 @@ hand-reviewed 8-section consulting report separating true positives from
 heuristic noise, with concrete fixes.
 
 **In-scope stack:** `[the MCP server repo(s) named here]`, git-tracked
-Python/Jinja/JS/TS source only.
+Python/Jinja source (AST-based) plus JS/TS/YAML/PowerShell/bash source
+(regex-based) -- see the Capability statement below for exactly which
+detector families run on which surface.
 
 **Access model:** `[read-only repo clone | supervised screen-share]`. The
 Provider does not run, deploy, or execute anything in `[Client]`'s stack.
@@ -43,23 +45,42 @@ Provider does not run, deploy, or execute anything in `[Client]`'s stack.
 > marketing; it is the scope of the deliverable.
 
 **What the tool genuinely did.** It read the git-tracked source of the
-target repo (Python AST for the deep path, regex for Jinja/JS/TS) and ran
-six detector families -- codegen/template injection, tool-param
-injection, auth/network posture, secret handling, write-tools-on-by-default
-/ tool-scope-creep, and secret-leak-via-tool-response (the last two added
-2026-07-19) -- producing the severity- and confidence-ranked findings table
-above with a file:line for each hit.
+target repo (Python AST for the deep path, regex for Jinja/JS/TS/YAML/
+PowerShell/bash) and ran seven detector families -- codegen/template
+injection, tool-param injection, auth/network posture, secret handling,
+tool-scope-creep (mutating `@mcp.tool()`-registered tools with no visible
+permission gate), secret-leak-via-tool-response (a tool's own `return`
+value leaking a credential or a whole config/environment dump back to the
+calling LLM), and job-hazards (over-broad scope, unconfirmed destructive
+calls, and unverified-success patterns in scheduled jobs, wrappers, and
+IaC/CI files) -- producing the severity- and confidence-ranked findings
+table above with a file:line for each hit. It then graded each finding for
+MCP-tool reachability: it discovered the registered tools (`@mcp.tool()` /
+`server.tool(...)` registrations and any `server.json` manifest) and walked a
+static call-graph to label whether each finding sits on code reachable from a
+tool (same-file exact, cross-file best-effort), nudging confidence up for
+reachable hits and down for unreachable ones. It then ran tool-parameter
+taint tracking v1: it seeded each registered tool handler's parameters as
+taint sources and propagated them through assignments, f-strings/concat/
+format, containers and same-repo calls into the dangerous sinks -- same-file
+transitively, one direct-import hop cross-file -- labelling each finding
+tainted / untainted / unknown and again nudging confidence (up for tainted,
+down for untainted), never dropping a finding.
 
 **What was expert-led (not the tool).** Separating true positives from
-low-confidence heuristic noise; confirming a finding is actually reachable
-from an attacker-controlled input; the fix-shape and ranked fix-lane plan
-below.
+low-confidence heuristic noise; confirming a finding is actually
+reachable from an attacker-controlled input; the fix-shape and ranked
+fix-lane plan below.
 
-**What it does NOT do -- stated plainly.** No dynamic analysis, no
-cross-file taint tracking beyond a single-hop helper-delegation check
-(same-file-or-one-hop heuristics only). No `server.json`/tool-schema
-parsing to independently confirm reachability. No git-history secret
-scanning (pair with `gitleaks`). No JS/TS AST parity (regex-level only).
+**What it does NOT do -- stated plainly.** No dynamic analysis. The taint
+pass is v1: it follows only ONE cross-file import hop (no second hop, no
+cross-repo flow), it is NOT sanitizer-aware (a validated/escaped value is
+still treated as tainted, by design over-flagging), and it does not model
+dynamic dispatch (getattr / *args / **kwargs). So it is honest tool-parameter
+taint tracking with a stated boundary, not deep whole-program taint.
+No git-history secret scanning (pair with `gitleaks`). No JS/TS AST parity
+(regex-level only). See the Detector-class reference below for the full
+built-vs-not-built breakdown.
 
 *(The "above"/"below" references match this text's placement in the
 delivered report, D1 §5-7; in this SOW they refer to that same report.)*
@@ -70,7 +91,7 @@ delivered report, D1 §5-7; in this SOW they refer to that same report.)*
 
 | # | Deliverable | Contents |
 |---|---|---|
-| D1 | Client-facing report | 8-section report: exec summary in plain incident language, top-3-to-fix, findings table (file:line · severity · class · remediation · confidence), critical-evidence appendix, detector-class reference (all six classes), Capability statement verbatim, ranked fix-lane plan. |
+| D1 | Client-facing report | 8-section report: exec summary in plain incident language, top-3-to-fix, findings table (file:line · severity · class · remediation · confidence), critical-evidence appendix, detector-class reference (all seven classes), Capability statement verbatim, ranked fix-lane plan. |
 | D2 | Raw JSON | Machine-readable findings for your own tooling / CI, via `mcp-scan <path> --json`. |
 | D3 | Ranked fix-lane plan | Findings sequenced by severity, each with a concrete fix-shape. Doubles as the scope of a follow-on fix engagement. |
 
@@ -91,9 +112,15 @@ delivered report, D1 §5-7; in this SOW they refer to that same report.)*
 
 - **No dynamic/runtime analysis.** Static source read only; the server is
   never run.
-- **No cross-file taint tracking.** Reachability is a same-file heuristic,
-  stated on every report.
-- **No full JS/TS AST parity.** Regex-level for non-Python source.
+- **No taint tracking past one cross-file import hop.** Same-file
+  dataflow is transitive; cross-file taint stops at the first hop, and it
+  is not sanitizer-aware (a validated value is still treated as tainted,
+  by design). Reachability grading is separate and covers same-file
+  exact / cross-file best-effort by function name.
+- **No full JS/TS AST parity.** Today's JS/TS coverage is regex/heuristic,
+  covering four of the seven detector families; codegen-injection and
+  auth-posture stay Python-only by scope decision, and JS/TS findings are
+  labelled reachability- and taint-unknown.
 - **No git-history secret scanning.** Pair with `gitleaks` for history;
   not rebuilt here.
 - **No hosted/SaaS dashboard.** CLI + CI gate (`--fail-on P1`) only.

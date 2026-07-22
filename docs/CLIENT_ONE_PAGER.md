@@ -2,7 +2,7 @@
 title: "MCP Security Scanner -- one-pager"
 type: sales-kit
 audience: client-facing (send as-is or paraphrase on a call)
-version: 2026-07-16
+version: 2026-07-22
 source: "README.md, PRODUCT.md, mcp_scanner/client_report.py"
 tags: [mcp-security-scanner, sales-kit, one-pager]
 ---
@@ -26,8 +26,9 @@ claim -- it's `tests/test_self_audit.py`.
 
 ## What it actually checks today
 
-Six detector families, each grounded in a real finding from a fleet-wide
-audit of production MCP servers:
+Seven detector families. The first six are grounded in a real finding from
+a fleet-wide audit of production MCP servers; the seventh (added
+2026-07-21) covers scheduled jobs, wrappers, and IaC/CI files:
 
 | # | Class | Detects |
 |---|---|---|
@@ -37,19 +38,40 @@ audit of production MCP servers:
 | 4 | Secret handling | Tracked `.env`/`.pem`/`.key` files, hardcoded secret-shaped literals, secrets passed to log/print. |
 | 5 | Write-tools-on-by-default / tool-scope-creep (added 2026-07-19) | A mutating `@mcp.tool()`-registered tool with no visible permission gate. |
 | 6 | Secret-leak-via-tool-response (added 2026-07-19) | A tool's `return` value leaking a credential back through the protocol to the calling LLM. |
+| 7 | Job hazards (added 2026-07-21) | Over-broad credential/ACL scope, an unconfirmed destructive call, or unverified-success reporting in cron/systemd/GitHub Actions/PowerShell/bash/batch job and deploy files. |
 
 Every finding carries a severity (P0 critical -> P3 hardening nit), a
 confidence (high/medium/low), a `file:line`, and a concrete fix.
 
+Four of these seven families -- tool-param injection, tool-scope-creep,
+secret-leak-via-tool-response, and secret handling's secret-in-log check --
+also run on JS/TS source (`.js`/`.mjs`/`.ts`), via string-aware regex
+heuristics rather than a JS/TS AST. Codegen-injection and auth-posture
+stay Python-only by deliberate scope decision (they're inherently
+Jinja- and Flask/FastAPI-decorator-shaped).
+
 ## Honest capability boundary -- stated plainly
 
-The two MCP-protocol-specific hazard classes an MCP-specific pitch would
-naturally lead with -- write-tools-on-by-default/tool-scope-creep and
-secret-leak-via-tool-response -- **now ship** (added 2026-07-19, detectors
-5 and 6 above). What's still generic-Python-appsec-only rather than
-MCP-manifest-aware: no cross-file taint tracking, no `server.json`/tool-schema
-parsing to confirm reachability. (See `PRODUCT.md` in the repo for the
-full remaining-gap list.)
+Beyond the seven detectors, the scanner now grades every finding two more
+ways. **Reachability** (built 2026-07-21): it discovers your registered
+MCP tools (`@mcp.tool()`/`server.tool(...)` and any `server.json` manifest)
+and walks a static call-graph to label each finding reachable from a tool,
+unreachable, or unknown -- same-file exact, cross-file best-effort by
+function name. **Tool-parameter taint tracking v1** (built 2026-07-21,
+cross-file budget raised 2026-07-22): it seeds each tool handler's
+parameters as taint sources and traces them same-file transitively and up
+to **two** direct-import hops cross-file into the dangerous sinks, labelling
+each finding tainted / untainted / unknown. Neither grading pass ever drops
+a finding -- it only raises or lowers confidence, so the over-flag
+philosophy holds throughout.
+
+What's still out: a third taint hop and cross-repo flow, sanitizer-aware
+propagation, and full JS/TS AST parity (today's JS/TS coverage is
+string-aware regex heuristics with documented gaps -- see `README.md`'s
+"Known JS/TS regex-heuristic gaps" section for the specifics, e.g.
+optional-chaining `eval`, a `return {...secret}` spread shape, and
+`.jsx`/`.tsx`/`.cjs` files not yet collected). (See `PRODUCT.md` in the
+repo for the full remaining-gap list.)
 
 ## Packages
 
@@ -61,11 +83,13 @@ full remaining-gap list.)
 
 ## Scope rails
 
-**Explicitly NOT included:** dynamic/runtime analysis, cross-file taint
-tracking (same-file heuristics only), full JS/TS AST parity (regex-level),
-git-history secret scanning (pair with `gitleaks`), a hosted/SaaS
-dashboard (CLI + CI gate only, today), and the two undetected classes
-above.
+**Explicitly NOT included:** dynamic/runtime analysis, taint tracking
+past two cross-file import hops or across repos, sanitizer-aware taint
+(a validated value is still treated as tainted, by design), full JS/TS
+AST parity (today's JS/TS coverage is regex/heuristic, four of seven
+detector families, with documented gaps), git-history secret scanning
+(pair with `gitleaks`), and a hosted/SaaS dashboard (CLI + CI gate only,
+today).
 
 ## Next step
 
