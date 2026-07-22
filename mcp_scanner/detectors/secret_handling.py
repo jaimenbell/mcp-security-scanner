@@ -15,6 +15,7 @@ import ast
 import re
 
 from ..models import Finding, Severity, Confidence
+from .. import js_util
 from .base import Detector, RepoContext, SourceFile
 
 # High-signal secret material patterns (value shapes, not names).
@@ -49,6 +50,19 @@ _TRACKED_SECRET_FILES = (
     re.compile(r"(^|/)id_rsa$"),
 )
 _EXAMPLE_ENV = re.compile(r"\.env\.(example|sample|template|dist)$")
+
+# --- JS/TS parity: secret-named value passed to a log call -----------------
+# No AST for JS/TS in this scanner. Line-based, and deliberately restricted
+# to non-string-literal text on the call's argument side, mirroring the
+# Python path's AST check (Name/Attribute *identifiers* only -- log MESSAGE
+# prose that happens to mention "token" must never trigger this, only an
+# actual secret-named variable/property passed as an argument).
+_JS_LOG_CALL = re.compile(
+    r"\b(?:console\.(?:log|error|warn|info|debug)|"
+    r"logger\.(?:log|info|debug|warn|error)|"
+    r"log\.(?:info|debug|warn|error))\s*\("
+)
+_JS_STRING_LITERAL = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`""")
 
 
 def _dotted(node: ast.AST) -> str:
@@ -90,6 +104,8 @@ class SecretHandlingDetector(Detector):
             findings.extend(self._scan_literals(f))
             if f.tree is not None:
                 findings.extend(self._scan_logging(f))
+            elif f.suffix in js_util.JS_SUFFIXES:
+                findings.extend(self._scan_js_logging(f))
 
         return findings
 
@@ -154,6 +170,36 @@ class SecretHandlingDetector(Detector):
                                         "or a boolean 'present/absent'.",
                             snippet=f.line_at(node.lineno),
                         ))
+        return out
+
+    def _scan_js_logging(self, f: SourceFile) -> list[Finding]:
+        out: list[Finding] = []
+        for i, raw_line in enumerate(f.lines, start=1):
+            if js_util.is_comment_line(raw_line):
+                continue
+            line = js_util.code_part(raw_line)
+            m = _JS_LOG_CALL.search(line)
+            if not m:
+                continue
+            arg_text = line[m.end():]
+            # Strip string-literal contents so log MESSAGE prose (e.g.
+            # "token required but not shown") never triggers this -- only an
+            # actual identifier/property name matching the secret-name
+            # heuristic does.
+            code_only = _JS_STRING_LITERAL.sub("", arg_text)
+            if _SECRET_NAME.search(code_only):
+                out.append(Finding(
+                    vuln_class="secret-in-log",
+                    title="Secret-named value passed to a log call",
+                    severity=Severity.P2, confidence=Confidence.LOW,
+                    file=f.rel, line=i,
+                    detail="A variable whose name suggests a credential is "
+                           "logged/printed; secrets can leak into log files or "
+                           "tool output.",
+                    remediation="Never log credentials. Redact to a fixed mask "
+                                "or a boolean 'present/absent'.",
+                    snippet=f.line_at(i),
+                ))
         return out
 
     def _arg_mentions_secret(self, call: ast.Call) -> bool:
