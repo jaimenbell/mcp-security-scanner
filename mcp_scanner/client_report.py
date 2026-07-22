@@ -16,7 +16,7 @@ a founder can read -- not a pattern dump:
   4. Findings by severity table -- + remediation + confidence columns
   5. Critical evidence appendix -- a reproducible proof per P0 (no P0
                                     without one)
-  6. Detector-class reference -- what the 6 built detectors cover, plus an
+  6. Detector-class reference -- what the 7 built detectors cover, plus an
                                   explicit, honest disclosure of what this
                                   scanner still does NOT detect (cross-file
                                   taint, git-history secrets, JS/TS AST
@@ -132,9 +132,9 @@ NOT_YET_BUILT = [
      "the scanner now ships tool-parameter *taint tracking v1*: it seeds every "
      "registered tool handler's parameters as sources and propagates them "
      "through assignments, f-strings/concat/format, containers and same-repo "
-     "calls into the dangerous sinks -- same-file transitively, and ONE direct-"
-     "import hop cross-file -- labelling each finding tainted/untainted/unknown "
-     "on top of the reachability grade. What remains out of scope: a SECOND "
+     "calls into the dangerous sinks -- same-file transitively, and up to TWO "
+     "direct-import hops cross-file -- labelling each finding tainted/untainted/unknown "
+     "on top of the reachability grade. What remains out of scope: a THIRD "
      "import hop and beyond, cross-repo taint, sanitizer-aware flow (a "
      "validated/escaped value is still treated as tainted, by design), and "
      "dynamic dispatch (getattr / *args / **kwargs re-binding)"),
@@ -185,7 +185,7 @@ reachable hits and down for unreachable ones. It then ran tool-parameter \
 taint tracking v1: it seeded each registered tool handler's parameters as \
 taint sources and propagated them through assignments, f-strings/concat/ \
 format, containers and same-repo calls into the dangerous sinks -- same-file \
-transitively, one direct-import hop cross-file -- labelling each finding \
+transitively, up to two direct-import hops cross-file -- labelling each finding \
 tainted / untainted / unknown and again nudging confidence (up for tainted, \
 down for untainted), never dropping a finding.
 
@@ -195,7 +195,7 @@ reachable from an attacker-controlled input; the fix-shape and ranked \
 fix-lane plan below.
 
 **What it does NOT do -- stated plainly.** No dynamic analysis. The taint \
-pass is v1: it follows only ONE cross-file import hop (no second hop, no \
+pass is v1: it follows only up to TWO cross-file import hops (no third hop, no \
 cross-repo flow), it is NOT sanitizer-aware (a validated/escaped value is \
 still treated as tainted, by design over-flagging), and it does not model \
 dynamic dispatch (getattr / *args / **kwargs). So it is honest tool-parameter \

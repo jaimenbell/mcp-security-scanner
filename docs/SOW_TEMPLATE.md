@@ -63,7 +63,7 @@ reachable hits and down for unreachable ones. It then ran tool-parameter
 taint tracking v1: it seeded each registered tool handler's parameters as
 taint sources and propagated them through assignments, f-strings/concat/
 format, containers and same-repo calls into the dangerous sinks -- same-file
-transitively, one direct-import hop cross-file -- labelling each finding
+transitively, up to two direct-import hops cross-file -- labelling each finding
 tainted / untainted / unknown and again nudging confidence (up for tainted,
 down for untainted), never dropping a finding.
 
@@ -73,13 +73,14 @@ reachable from an attacker-controlled input; the fix-shape and ranked
 fix-lane plan below.
 
 **What it does NOT do -- stated plainly.** No dynamic analysis. The taint
-pass is v1: it follows only ONE cross-file import hop (no second hop, no
+pass is v1: it follows only up to TWO cross-file import hops (no third hop, no
 cross-repo flow), it is NOT sanitizer-aware (a validated/escaped value is
 still treated as tainted, by design over-flagging), and it does not model
 dynamic dispatch (getattr / *args / **kwargs). So it is honest tool-parameter
 taint tracking with a stated boundary, not deep whole-program taint.
 No git-history secret scanning (pair with `gitleaks`). No JS/TS AST parity
-(regex-level only). See the Detector-class reference below for the full
+(regex-level only; JS findings are labelled reachability- and
+taint-unknown). See the Detector-class reference below for the full
 built-vs-not-built breakdown.
 
 *(The "above"/"below" references match this text's placement in the
@@ -112,11 +113,12 @@ delivered report, D1 §5-7; in this SOW they refer to that same report.)*
 
 - **No dynamic/runtime analysis.** Static source read only; the server is
   never run.
-- **No taint tracking past one cross-file import hop.** Same-file
-  dataflow is transitive; cross-file taint stops at the first hop, and it
-  is not sanitizer-aware (a validated value is still treated as tainted,
-  by design). Reachability grading is separate and covers same-file
-  exact / cross-file best-effort by function name.
+- **No taint tracking past two cross-file import hops.** Same-file
+  dataflow is transitive; cross-file taint stops at the second hop (no
+  third hop, no cross-repo flow), and it is not sanitizer-aware (a
+  validated value is still treated as tainted, by design). Reachability
+  grading is separate and covers same-file exact / cross-file
+  best-effort by function name.
 - **No full JS/TS AST parity.** Today's JS/TS coverage is regex/heuristic,
   covering four of the seven detector families; codegen-injection and
   auth-posture stay Python-only by scope decision, and JS/TS findings are
