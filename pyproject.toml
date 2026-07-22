@@ -13,7 +13,7 @@ authors = [{ name = "Jaime Bell" }]
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "pyyaml>=6"]
 
 [project.scripts]
 mcp-scan = "mcp_scanner.cli:main"

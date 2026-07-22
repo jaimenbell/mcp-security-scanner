@@ -1,0 +1,131 @@
+# Managed MCP Watch -- composite GitHub Action.
+#
+# Runs the (MIT, public) mcp-security-scanner against the CLIENT'S repo,
+# inside the CLIENT'S CI. Egress contract (docs/SAAS-TIER-SPEC.md section 3):
+#
+#   * The client's source code NEVER leaves the client's runner.
+#   * The full client report is uploaded to the CLIENT'S artifact store only.
+#   * The ONLY optional egress is a counts-only summary webhook
+#     (counts-webhook-url input), OFF by default. Its payload is built by
+#     mcp_scanner.watch_summary and contains counts + repo/commit metadata
+#     only -- no file paths, no snippets, no finding text. This is locked
+#     by tests (tests/test_watch_summary.py, tests/test_watch_action.py).
+#
+# Version pinning: reference this action at a release tag, e.g.
+#   uses: jaimenbell/mcp-security-scanner/action@v0.1.0
+# GitHub checks out the whole scanner repo at that tag, so the pip install
+# below installs exactly the pinned scanner version (no PyPI involved).
+
+name: "Managed MCP Watch"
+description: >
+  Static security scan for MCP servers: codegen injection, tool-parameter
+  injection, auth posture, secret handling. Fails the build on findings at
+  or above the configured severity. Your source never leaves your runner.
+author: "Jaime Bell"
+
+branding:
+  icon: "shield"
+  color: "green"
+
+inputs:
+  scan-path:
+    description: "Path within your repo to scan."
+    required: false
+    default: "."
+  fail-on:
+    description: >
+      Fail the build if any finding is at or above this severity
+      (P0, P1, P2, or P3). Set to an empty string to disable the gate
+      (report-only mode).
+    required: false
+    default: "P1"
+  client-name:
+    description: "Name printed in the client report header."
+    required: false
+    default: "the client"
+  report-artifact-name:
+    description: "Name of the uploaded (client-side) report artifact."
+    required: false
+    default: "mcp-scan-report"
+  counts-webhook-url:
+    description: >
+      OPTIONAL, OFF by default (empty). If set, POSTs a counts-only summary
+      (repo, commit, scanner version, severity histogram -- never source,
+      paths, or finding text) to this URL after each scan. Leave empty to
+      transmit nothing anywhere.
+    required: false
+    default: ""
+  python-version:
+    description: "Python version used to run the scanner."
+    required: false
+    default: "3.11"
+
+outputs:
+  report-path:
+    description: "Runner-local path of the generated client report."
+    value: ${{ steps.scan.outputs.report-path }}
+  clean-bill:
+    description: "true when the scan found no P0/P1 findings."
+    value: ${{ steps.scan.outputs.clean-bill }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install pinned scanner from this action's checkout
+      shell: bash
+      run: |
+        # github.action_path is <scanner-repo-at-pinned-ref>/action, so the
+        # parent directory is the scanner package itself at exactly the ref
+        # the client pinned. No PyPI, no editable install, no env vars.
+        python -m pip install --quiet "${{ github.action_path }}/.."
+
+    - name: Scan and write report (stays on this runner)
+      id: scan
+      shell: bash
+      run: |
+        REPORT="$RUNNER_TEMP/mcp-scan-report.md"
+        FINDINGS="$RUNNER_TEMP/mcp-scan-findings.json"
+        mcp-scan "${{ inputs.scan-path }}" --client-report \
+          --client-name "${{ inputs.client-name }}" > "$REPORT"
+        mcp-scan "${{ inputs.scan-path }}" --json > "$FINDINGS"
+        CLEAN=$(python -c "import json,sys; print(str(json.load(open(sys.argv[1]))['clean_bill']).lower())" "$FINDINGS")
+        echo "report-path=$REPORT" >> "$GITHUB_OUTPUT"
+        echo "findings-path=$FINDINGS" >> "$GITHUB_OUTPUT"
+        echo "clean-bill=$CLEAN" >> "$GITHUB_OUTPUT"
+
+    - name: Upload report artifact (client-side artifact store)
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.report-artifact-name }}
+        path: ${{ steps.scan.outputs.report-path }}
+        if-no-files-found: error
+
+    - name: Post counts-only summary (opt-in, off by default)
+      if: ${{ inputs.counts-webhook-url != '' }}
+      shell: bash
+      run: |
+        # Build the allowlisted counts payload (no source material -- see
+        # mcp_scanner/watch_summary.py and its egress tests), then POST it.
+        # This is the ONLY network egress in this action.
+        SUMMARY="$RUNNER_TEMP/mcp-scan-summary.json"
+        python -m mcp_scanner.watch_summary \
+          --json-file "${{ steps.scan.outputs.findings-path }}" \
+          --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" > "$SUMMARY"
+        curl --silent --show-error --fail-with-body \
+          -X POST -H "Content-Type: application/json" \
+          --data @"$SUMMARY" \
+          "${{ inputs.counts-webhook-url }}"
+
+    - name: Severity gate
+      if: ${{ inputs.fail-on != '' }}
+      shell: bash
+      run: |
+        # Exit 2 (build failure) on any finding at/above inputs.fail-on.
+        # Runs LAST so a red build still ships its client-side artifact.
+        mcp-scan "${{ inputs.scan-path }}" \
+          --fail-on "${{ inputs.fail-on }}" > /dev/null
