@@ -37,13 +37,20 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .models import ScanResult, Finding, Severity, Confidence, Reachability
+from .models import ScanResult, Finding, Severity, Confidence, Reachability, Taint
 
 # Compact, client-readable labels for the reachability grade.
 REACHABILITY_LABEL = {
     Reachability.REACHABLE: "reachable",
     Reachability.UNREACHABLE: "unreachable",
     Reachability.UNKNOWN: "unknown",
+}
+
+# Compact, client-readable labels for the tool-parameter taint grade.
+TAINT_LABEL = {
+    Taint.TAINTED: "tainted",
+    Taint.UNTAINTED: "untainted",
+    Taint.UNKNOWN: "unknown",
 }
 
 # --------------------------------------------------------------------- #
@@ -121,14 +128,16 @@ DETECTOR_CLASS_TABLE = [
 # out-of-scope list (spec §1.3 / this repo's own PRODUCT.md), stated
 # plainly so the report never overclaims coverage it doesn't have.
 NOT_YET_BUILT = [
-    ("Full cross-file/cross-repo taint tracking",
-     "whether a specific *value* flows from an untrusted tool argument, "
-     "through another file or module, into a dangerous sink. The scanner now "
-     "does manifest-aware *reachability* grading (does a call path from a "
-     "registered MCP tool reach the flagged function -- same-file call-graph "
-     "exact, cross-file best-effort by name) and labels every finding "
-     "reachable/unreachable/unknown, but it does not yet track the individual "
-     "tainted value along that path"),
+    ("Deep / multi-hop cross-file taint tracking",
+     "the scanner now ships tool-parameter *taint tracking v1*: it seeds every "
+     "registered tool handler's parameters as sources and propagates them "
+     "through assignments, f-strings/concat/format, containers and same-repo "
+     "calls into the dangerous sinks -- same-file transitively, and ONE direct-"
+     "import hop cross-file -- labelling each finding tainted/untainted/unknown "
+     "on top of the reachability grade. What remains out of scope: a SECOND "
+     "import hop and beyond, cross-repo taint, sanitizer-aware flow (a "
+     "validated/escaped value is still treated as tainted, by design), and "
+     "dynamic dispatch (getattr / *args / **kwargs re-binding)"),
     ("Git-history secret scanning",
      "whether a credential was ever committed and later removed -- this "
      "scan only sees the current git-tracked working tree (pair with "
@@ -172,20 +181,29 @@ MCP-tool reachability: it discovered the registered tools (`@mcp.tool()` / \
 `server.tool(...)` registrations and any `server.json` manifest) and walked a \
 static call-graph to label whether each finding sits on code reachable from a \
 tool (same-file exact, cross-file best-effort), nudging confidence up for \
-reachable hits and down for unreachable ones.
+reachable hits and down for unreachable ones. It then ran tool-parameter \
+taint tracking v1: it seeded each registered tool handler's parameters as \
+taint sources and propagated them through assignments, f-strings/concat/ \
+format, containers and same-repo calls into the dangerous sinks -- same-file \
+transitively, one direct-import hop cross-file -- labelling each finding \
+tainted / untainted / unknown and again nudging confidence (up for tainted, \
+down for untainted), never dropping a finding.
 
 **What was expert-led (not the tool).** Separating true positives from \
 low-confidence heuristic noise; confirming a finding is actually \
 reachable from an attacker-controlled input; the fix-shape and ranked \
 fix-lane plan below.
 
-**What it does NOT do -- stated plainly.** No dynamic analysis. \
-Reachability grading is a static call-graph (same-file exact, cross-file \
-best-effort by name) -- it does NOT track the individual tainted value along \
-that path, so it is a reachability label, not full cross-file taint tracking. \
+**What it does NOT do -- stated plainly.** No dynamic analysis. The taint \
+pass is v1: it follows only ONE cross-file import hop (no second hop, no \
+cross-repo flow), it is NOT sanitizer-aware (a validated/escaped value is \
+still treated as tainted, by design over-flagging), and it does not model \
+dynamic dispatch (getattr / *args / **kwargs). So it is honest tool-parameter \
+taint tracking with a stated boundary, not deep whole-program taint. \
 No git-history secret scanning (pair with `gitleaks`). No JS/TS AST parity \
-(regex-level only; JS findings are labelled reachability-unknown). See the \
-Detector-class reference below for the full built-vs-not-built breakdown."""
+(regex-level only; JS findings are labelled reachability- and taint-unknown). \
+See the Detector-class reference below for the full built-vs-not-built \
+breakdown."""
 
 
 # --------------------------------------------------------------------- #
@@ -298,8 +316,8 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
     L += [
         "## 3. Findings by severity",
         "",
-        "| File:Line | Severity | Class | What it is | Remediation | Confidence | Reachable? |",
-        "|---|---|---|---|---|---|---|",
+        "| File:Line | Severity | Class | What it is | Remediation | Confidence | Reachable? | Tainted? |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for f in findings:
         L.append(
@@ -307,10 +325,11 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
             f"| {_md_cell(_first_sentence(f.detail))} "
             f"| {_md_cell(f.remediation or '--')} "
             f"| {f.confidence.value} "
-            f"| {REACHABILITY_LABEL[f.reachability]} |"
+            f"| {REACHABILITY_LABEL[f.reachability]} "
+            f"| {TAINT_LABEL[f.taint]} |"
         )
     if not findings:
-        L.append("| -- | -- | -- | _no findings_ | -- | -- | -- |")
+        L.append("| -- | -- | -- | _no findings_ | -- | -- | -- | -- |")
     L += [""]
     L += ["_Reachable?_ = whether the flagged code sits inside a registered "
           "MCP tool handler or a function transitively called from one "
@@ -318,6 +337,15 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
           "**reachable** raises confidence, **unreachable** lowers it; "
           "**unknown** = non-Python surface, module-level code, or no "
           "discoverable tools. No finding is ever dropped on this basis.", ""]
+    L += ["_Tainted?_ = whether a TOOL PARAMETER's value provably flows into "
+          "the flagged sink (dataflow, not just reachability): sources are the "
+          "registered tool handlers' parameters, propagated through "
+          "assignments / f-strings / concat / containers / same-repo calls "
+          "(same-file transitive, one import hop cross-file). "
+          "**tainted** raises confidence, **untainted** (constant / other "
+          "source) lowers it; **unknown** = non-dataflow class, module-level / "
+          "tool-unreachable code, a second import hop, or no discoverable "
+          "tools. Also never drops a finding.", ""]
 
     # 5. Critical evidence appendix ----------------------------------------- #
     L += ["## 4. Critical evidence appendix", ""]
