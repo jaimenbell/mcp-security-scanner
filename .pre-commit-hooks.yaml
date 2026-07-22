@@ -1,0 +1,26 @@
+# pre-commit hook definitions for mcp-security-scanner.
+#
+# Consumers add this repo to their .pre-commit-config.yaml pinned to a
+# release tag (see docs/watch/ONBOARDING.md for the copy-paste snippet):
+#
+#   repos:
+#     - repo: https://github.com/jaimenbell/mcp-security-scanner
+#       rev: v0.1.0
+#       hooks:
+#         - id: mcp-scan
+#
+# The hook scans the whole repo (not just staged files -- cross-file
+# reachability and taint need full context) and blocks the commit when any
+# finding is at or above P1. Everything runs locally; nothing is transmitted.
+
+- id: mcp-scan
+  name: mcp-scan (block P0/P1 MCP security findings)
+  description: >
+    Static security scan for MCP servers (codegen injection, tool-parameter
+    injection, auth posture, secret handling). Fails on P0/P1 findings.
+    Runs entirely locally.
+  entry: mcp-scan
+  args: [".", "--fail-on", "P1"]
+  language: python
+  pass_filenames: false
+  always_run: true
