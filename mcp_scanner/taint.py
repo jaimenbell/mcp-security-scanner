@@ -15,17 +15,19 @@ This pass closes that gap, statically:
   2. Propagate taint through assignments, f-strings / string concat / ``%`` /
      ``.format()``, common containers (list/tuple/dict/set, subscript,
      attribute) and same-repo function calls -- transitively within a file,
-     and (Slice 2) one direct-import hop into another same-repo module.
+     and up to TWO direct-import hops into other same-repo modules (Slice 2
+     shipped one hop; Slice 3 raised the budget to two).
   3. Sinks are the param-injection detector's dangerous calls
      (subprocess/os.system/eval/exec/pickle/yaml.load/HTTP-fetch/open). Label
      each such finding TAINTED / UNTAINTED / UNKNOWN and nudge confidence up
      (TAINTED) or down (UNTAINTED). It NEVER drops a finding.
 
 Honest boundary (stated on the report): same-file dataflow is transitive;
-cross-file is ONE direct-import hop only (no second hop, no decorator-transform
-tracking, no dynamic dispatch / ``getattr`` / ``*args`` re-binding). Non-Python
-findings, module-level code, code unreachable from any tool, and non-dataflow
-detector classes are labelled UNKNOWN rather than guessed.
+cross-file follows up to TWO direct-import hops (no third hop, no
+decorator-transform tracking, no dynamic dispatch / ``getattr`` / ``*args``
+re-binding). Non-Python findings, module-level code, code unreachable from
+any tool, and non-dataflow detector classes are labelled UNKNOWN rather than
+guessed.
 """
 
 from __future__ import annotations
@@ -54,12 +56,14 @@ _DATAFLOW_CLASSES = {
     "path-traversal",
 }
 
-# Cross-file (one-direct-import-hop) propagation. Same-file dataflow is
-# transitive; from a tool-reachable function we follow ONE import hop into
-# another same-repo module and propagate through the callee's params to its
-# sinks. No second hop, no decorator-transform tracking, no dynamic dispatch
-# (getattr / *args / **kwargs re-binding) -- all stated as honest limits.
+# Cross-file propagation, up to two direct-import hops (Slice 3; Slice 2
+# shipped one hop). Same-file dataflow is transitive; from a tool-reachable
+# function we follow import hops into other same-repo modules and propagate
+# through each callee's params to its sinks. No third hop, no
+# decorator-transform tracking, no dynamic dispatch (getattr / *args /
+# **kwargs re-binding) -- all stated as honest limits.
 _CROSS_FILE = True
+_CROSS_FILE_HOP_BUDGET = 2
 
 
 # --------------------------------------------------------------------- #
@@ -260,7 +264,7 @@ class TaintEngine:
                 continue
             params = set(self._param_names(r))
             seeds[id(r)] = set(params)
-            stack.append((r, frozenset(params), 1))
+            stack.append((r, frozenset(params), _CROSS_FILE_HOP_BUDGET))
         while stack:
             node, seed, budget = stack.pop()
             cur = seeds.setdefault(id(node), set())

@@ -1,8 +1,9 @@
-"""Tool-parameter taint tracking -- Slice 2, cross-file (one import hop).
+"""Tool-parameter taint tracking -- Slice 2/3, cross-file (two import hops).
 
-Follows a tool parameter one direct-import hop into another same-repo module and
-propagates through the callee's params to its sinks. Documents the one-hop
-limit: a second import hop is NOT followed (stays taint-UNKNOWN) even though the
+Follows a tool parameter up to TWO direct-import hops into other same-repo
+modules and propagates through each callee's params to its sinks (Slice 3
+raised the budget from one hop to two). Documents the new two-hop limit: a
+THIRD import hop is NOT followed (stays taint-UNKNOWN) even though the
 reachability pass still reaches it.
 """
 import pytest
@@ -38,10 +39,19 @@ def test_same_file_baseline_still_tainted(graded):
     assert _by_snippet(graded, "localdirect").taint is Taint.TAINTED
 
 
-def test_second_import_hop_is_not_followed(graded):
-    # deeper.deep_sink is TWO hops from the tool. Reachability still reaches it
-    # (unbounded by name); taint honestly declines -> UNKNOWN, the stated limit.
+def test_second_import_hop_is_now_tainted(graded):
+    # deeper.deep_sink is TWO hops from the tool (server -> sinks -> deeper).
+    # Slice 3 raised the cross-file budget to two hops, so this is TAINTED.
     f = _by_snippet(graded, '"deep ')
+    assert f.taint is Taint.TAINTED
+    assert f.reachability is Reachability.REACHABLE
+
+
+def test_third_import_hop_is_not_followed(graded):
+    # deepest.deepest_sink is THREE hops from the tool. Reachability still
+    # reaches it (unbounded by name); taint honestly declines -> UNKNOWN,
+    # the new stated limit.
+    f = _by_snippet(graded, '"deepest ')
     assert f.taint is Taint.UNKNOWN
     assert f.reachability is Reachability.REACHABLE
 
