@@ -6,6 +6,8 @@ status: prototype
 
 # mcp-security-scanner
 
+[![CI](https://github.com/jaimenbell/mcp-security-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/jaimenbell/mcp-security-scanner/actions/workflows/ci.yml)
+
 A static security scanner for [Model Context Protocol](https://modelcontextprotocol.io) servers. Point it at an MCP server repo; it reads the source and flags the vulnerability classes that actually show up in production MCP servers — with a severity, a `file:line`, a remediation, and an honest **confidence** on every finding.
 
 > [!info] What this is, plainly
@@ -88,8 +90,12 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 162 tests (155 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer
+python -m pytest -q     # 173 tests (166 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer + the CI README count-verification gate's own unit tests
 ```
+
+CI (`.github/workflows/ci.yml`) runs this suite on every push/PR and fails the
+build if this claimed count drifts from what the suite actually reports --
+see `scripts/check_readme_counts.py`.
 
 The self-audit tests (7 of the 162) require `MCP_SCANNER_FLEET_ROOT` to be set
 and pointed at real MCP server repos to scan; they skip cleanly if it's
