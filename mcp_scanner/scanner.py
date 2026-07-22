@@ -9,6 +9,7 @@ from pathlib import Path
 from .detectors import ALL_DETECTORS
 from .detectors.base import Detector, RepoContext, SourceFile
 from .models import ScanResult
+from .reachability import grade_result
 
 # Files we parse for AST / regex. Everything else is ignored except for the
 # tracked-file secret check (which uses the git manifest, not content).
@@ -101,4 +102,10 @@ def scan_repo(target: str, detectors: list[Detector] | None = None) -> ScanResul
                 result.add(finding)
         except Exception as e:  # a detector crash must not sink the whole scan
             result.errors.append(f"detector {det.name} crashed: {e}")
+    # Post-detector pass: label each finding with tool-reachability and nudge
+    # confidence accordingly. Guarded so a grading bug can never sink a scan.
+    try:
+        grade_result(ctx, result)
+    except Exception as e:
+        result.errors.append(f"reachability grading crashed: {e}")
     return result

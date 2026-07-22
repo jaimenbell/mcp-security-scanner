@@ -59,6 +59,7 @@ def render_markdown(result: ScanResult) -> str:
             loc = f"`{f.file}`" + (f":{f.line}" if f.line else "")
             lines.append(f"### {i}. [{f.severity.value}] {f.title}  \n"
                          f"*{f.severity.label} | confidence: {f.confidence.value} | "
+                         f"reachable: {f.reachability.value} | "
                          f"class: `{f.vuln_class}` | {loc}*")
             lines.append("")
             lines.append(f"- **What:** {f.detail}")

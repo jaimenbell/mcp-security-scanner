@@ -37,7 +37,14 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .models import ScanResult, Finding, Severity, Confidence
+from .models import ScanResult, Finding, Severity, Confidence, Reachability
+
+# Compact, client-readable labels for the reachability grade.
+REACHABILITY_LABEL = {
+    Reachability.REACHABLE: "reachable",
+    Reachability.UNREACHABLE: "unreachable",
+    Reachability.UNKNOWN: "unknown",
+}
 
 # --------------------------------------------------------------------- #
 # Static vocabulary
@@ -114,11 +121,14 @@ DETECTOR_CLASS_TABLE = [
 # out-of-scope list (spec §1.3 / this repo's own PRODUCT.md), stated
 # plainly so the report never overclaims coverage it doesn't have.
 NOT_YET_BUILT = [
-    ("Cross-file/cross-repo taint tracking",
-     "whether a value flows from an untrusted tool argument, through "
-     "another file or module, into a dangerous sink -- every detector "
-     "above is a same-file (or, for tool-scope-creep, one-hop) heuristic, "
-     "not a real call graph"),
+    ("Full cross-file/cross-repo taint tracking",
+     "whether a specific *value* flows from an untrusted tool argument, "
+     "through another file or module, into a dangerous sink. The scanner now "
+     "does manifest-aware *reachability* grading (does a call path from a "
+     "registered MCP tool reach the flagged function -- same-file call-graph "
+     "exact, cross-file best-effort by name) and labels every finding "
+     "reachable/unreachable/unknown, but it does not yet track the individual "
+     "tainted value along that path"),
     ("Git-history secret scanning",
      "whether a credential was ever committed and later removed -- this "
      "scan only sees the current git-tracked working tree (pair with "
@@ -157,19 +167,25 @@ value leaking a credential or a whole config/environment dump back to the \
 calling LLM), and job-hazards (over-broad scope, unconfirmed destructive \
 calls, and unverified-success patterns in scheduled jobs, wrappers, and \
 IaC/CI files) -- producing the severity- and confidence-ranked findings \
-table above with a file:line for each hit.
+table above with a file:line for each hit. It then graded each finding for \
+MCP-tool reachability: it discovered the registered tools (`@mcp.tool()` / \
+`server.tool(...)` registrations and any `server.json` manifest) and walked a \
+static call-graph to label whether each finding sits on code reachable from a \
+tool (same-file exact, cross-file best-effort), nudging confidence up for \
+reachable hits and down for unreachable ones.
 
 **What was expert-led (not the tool).** Separating true positives from \
 low-confidence heuristic noise; confirming a finding is actually \
 reachable from an attacker-controlled input; the fix-shape and ranked \
 fix-lane plan below.
 
-**What it does NOT do -- stated plainly.** No dynamic analysis. No \
-cross-file/cross-repo taint tracking (same-file heuristics only, with one \
-deliberate one-hop exception in tool-scope-creep for a directly-called \
-gating helper). No git-history secret scanning (pair with `gitleaks`). No \
-JS/TS AST parity (regex-level only). See the Detector-class reference \
-below for the full built-vs-not-built breakdown."""
+**What it does NOT do -- stated plainly.** No dynamic analysis. \
+Reachability grading is a static call-graph (same-file exact, cross-file \
+best-effort by name) -- it does NOT track the individual tainted value along \
+that path, so it is a reachability label, not full cross-file taint tracking. \
+No git-history secret scanning (pair with `gitleaks`). No JS/TS AST parity \
+(regex-level only; JS findings are labelled reachability-unknown). See the \
+Detector-class reference below for the full built-vs-not-built breakdown."""
 
 
 # --------------------------------------------------------------------- #
@@ -282,19 +298,26 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
     L += [
         "## 3. Findings by severity",
         "",
-        "| File:Line | Severity | Class | What it is | Remediation | Confidence |",
-        "|---|---|---|---|---|---|",
+        "| File:Line | Severity | Class | What it is | Remediation | Confidence | Reachable? |",
+        "|---|---|---|---|---|---|---|",
     ]
     for f in findings:
         L.append(
             f"| `{f.file}:{f.line}` | {f.severity.value} | `{f.vuln_class}` "
             f"| {_md_cell(_first_sentence(f.detail))} "
             f"| {_md_cell(f.remediation or '--')} "
-            f"| {f.confidence.value} |"
+            f"| {f.confidence.value} "
+            f"| {REACHABILITY_LABEL[f.reachability]} |"
         )
     if not findings:
-        L.append("| -- | -- | -- | _no findings_ | -- | -- |")
+        L.append("| -- | -- | -- | _no findings_ | -- | -- | -- |")
     L += [""]
+    L += ["_Reachable?_ = whether the flagged code sits inside a registered "
+          "MCP tool handler or a function transitively called from one "
+          "(same-file call-graph exact, cross-file best-effort). "
+          "**reachable** raises confidence, **unreachable** lowers it; "
+          "**unknown** = non-Python surface, module-level code, or no "
+          "discoverable tools. No finding is ever dropped on this basis.", ""]
 
     # 5. Critical evidence appendix ----------------------------------------- #
     L += ["## 4. Critical evidence appendix", ""]

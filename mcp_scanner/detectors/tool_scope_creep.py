@@ -35,6 +35,7 @@ import ast
 import re
 
 from ..models import Finding, Severity, Confidence
+from ..tool_registry import _dotted, _is_tool_decorator, _declared_tool_name
 from .base import Detector, RepoContext, SourceFile
 
 # --- mutating-by-name heuristic ------------------------------------------
@@ -69,31 +70,8 @@ _ENV_OPT_IN = re.compile(
 )
 
 
-def _dotted(node: ast.AST) -> str:
-    if isinstance(node, ast.Attribute):
-        base = _dotted(node.value)
-        return f"{base}.{node.attr}" if base else node.attr
-    if isinstance(node, ast.Name):
-        return node.id
-    return ""
-
-
 def _unparse(node: ast.AST) -> str:
     return ast.unparse(node) if hasattr(ast, "unparse") else ""
-
-
-def _is_tool_decorator(deco: ast.AST) -> bool:
-    target = deco.func if isinstance(deco, ast.Call) else deco
-    dotted = _dotted(target)
-    return bool(dotted) and dotted.split(".")[-1] == "tool"
-
-
-def _declared_tool_name(deco: ast.AST, fallback: str) -> str:
-    if isinstance(deco, ast.Call):
-        for kw in deco.keywords:
-            if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                return kw.value.value
-    return fallback
 
 
 def _is_mutating_sink_call(call: ast.Call) -> bool:

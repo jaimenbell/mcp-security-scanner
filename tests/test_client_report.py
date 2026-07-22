@@ -125,7 +125,10 @@ def test_scope_method_quotes_capability_statement_and_discloses_gap():
     assert "secret-leak-via-tool-response" in built
     # the genuinely-remaining gaps must still be disclosed honestly
     assert "not yet" in out.lower() or "NOT yet" in out
-    assert "Cross-file/cross-repo taint tracking" in out
+    # Manifest-aware reachability shipped 2026-07-21 -- FULL cross-file taint
+    # tracking (tracking the individual tainted value) is still the disclosed
+    # gap, distinct from the reachability labelling that now exists.
+    assert "cross-file" in out.lower() and "taint tracking" in out.lower()
     assert "Git-history secret scanning" in out
 
 
