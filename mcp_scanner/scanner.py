@@ -10,6 +10,7 @@ from .detectors import ALL_DETECTORS
 from .detectors.base import Detector, RepoContext, SourceFile
 from .models import ScanResult
 from .reachability import grade_result
+from .taint import grade_result as grade_taint
 
 # Files we parse for AST / regex. Everything else is ignored except for the
 # tracked-file secret check (which uses the git manifest, not content).
@@ -108,4 +109,11 @@ def scan_repo(target: str, detectors: list[Detector] | None = None) -> ScanResul
         grade_result(ctx, result)
     except Exception as e:
         result.errors.append(f"reachability grading crashed: {e}")
+    # Second post-detector pass: tool-parameter taint tracking. Runs after
+    # reachability (its confidence axis is orthogonal) and is guarded so a
+    # taint bug can never sink a scan.
+    try:
+        grade_taint(ctx, result)
+    except Exception as e:
+        result.errors.append(f"taint grading crashed: {e}")
     return result
