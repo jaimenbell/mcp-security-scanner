@@ -127,6 +127,23 @@ def test_cli_builds_payload_from_json_file(tmp_path, vuln_scan_dict):
     assert payload["total_findings"] == len(vuln_scan_dict["findings"])
 
 
+def test_cli_accepts_utf8_bom_json(tmp_path, vuln_scan_dict):
+    """Windows runners commonly produce BOM-prefixed JSON (PowerShell
+    Out-File / redirection). The CLI must tolerate it."""
+    scan_file = tmp_path / "scan_bom.json"
+    scan_file.write_bytes(b"\xef\xbb\xbf"
+                          + json.dumps(vuln_scan_dict).encode("utf-8"))
+    out = subprocess.run(
+        [sys.executable, "-m", "mcp_scanner.watch_summary",
+         "--json-file", str(scan_file),
+         "--repo", "acme/mcp-server", "--commit", "abc1234"],
+        capture_output=True, text=True,
+        cwd=str(Path(__file__).parent.parent),
+    )
+    assert out.returncode == 0, out.stderr
+    assert set(json.loads(out.stdout).keys()) == ALLOWED_KEYS
+
+
 def test_cli_rejects_missing_file(tmp_path):
     out = subprocess.run(
         [sys.executable, "-m", "mcp_scanner.watch_summary",
