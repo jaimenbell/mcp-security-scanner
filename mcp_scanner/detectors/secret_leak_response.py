@@ -19,15 +19,14 @@ returned dict/tuple/list/bare-expression includes, at a leaf value position:
   own value-pattern list directly).
 
 Reuse, not reinvention: the secret-name vocabulary is the exact
-``_SECRET_NAME`` regex object imported from ``secret_handling.py`` (per the
-spec's own note that it is "directly reusable"). The only new logic here is
-a *word-boundary-aware* wrapper around it (``_name_looks_secret``) — the bare
-regex is a substring search with no notion of word boundaries, so applied to
-an identifier as-is it would flag names like ``tokenizer_version`` or
-``passwordless_mode`` (contains "token"/"password" as a *glued* substring,
-not a real secret). The wrapper rejects a match only when it is glued to
-more letters on either side with no separator/case-boundary between them —
-a legitimate whole-word hit like ``SECRET_KEY`` or ``api_key`` still fires.
+``_SECRET_NAME`` regex object, and the word-boundary-aware wrapper around it
+(``_name_looks_secret``) that rejects a match glued to more letters on
+either side with no separator between them (e.g. ``tokenizer_version``,
+``passwordless_mode``, ``apiKeyValidator`` — a *glued* substring, not a real
+secret; ``SECRET_KEY``/``api_key`` still fire), are both imported from
+``secret_handling.py`` (moved there 2026-07-22 so ``secret_handling.py``'s
+own JS-logging check could reuse the same guard instead of carrying a second,
+weaker copy — see that module for the implementation).
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ from ..models import Finding, Severity, Confidence
 from .. import js_util
 from ..tool_registry import extract_tool_registry
 from .base import Detector, RepoContext, SourceFile
-from .secret_handling import _SECRET_NAME, _SECRET_VALUE_PATTERNS, _JS_STRING_LITERAL
+from .secret_handling import _SECRET_VALUE_PATTERNS, _JS_STRING_LITERAL, _name_looks_secret
 
 _WHOLE_OBJECT_NAME = {"config", "settings", "cfg", "conf", "env", "environment", "secrets"}
 
@@ -124,24 +123,6 @@ def _dotted(node: ast.AST) -> str:
     if isinstance(node, ast.Name):
         return node.id
     return ""
-
-
-def _name_looks_secret(name: str) -> bool:
-    """``_SECRET_NAME`` (reused as-is) with a word-boundary guard so a
-    substring glued inside a longer, unrelated word doesn't count."""
-    if not name:
-        return False
-    m = _SECRET_NAME.search(name)
-    if not m:
-        return False
-    start, end = m.span()
-    before = name[start - 1] if start > 0 else ""
-    after = name[end] if end < len(name) else ""
-    if before.isalpha() and before.islower():
-        return False
-    if after.isalpha() and after.islower():
-        return False
-    return True
 
 
 def _is_tool_decorator(deco: ast.AST) -> bool:

@@ -63,6 +63,33 @@ _JS_LOG_CALL = re.compile(
     r"log\.(?:info|debug|warn|error))\s*\("
 )
 _JS_STRING_LITERAL = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`""")
+_IDENT = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+
+def _name_looks_secret(name: str) -> bool:
+    """``_SECRET_NAME`` (reused as-is) with a word-boundary guard so a
+    substring glued inside a longer, unrelated word doesn't count -- e.g.
+    ``tokenizer_version``/``passwordless_mode`` (glued continuation letters)
+    or ``apiKeyValidator``/``tokenizerConfig`` (glued compound-word letters,
+    camelCase or not -- ANY letter immediately touching either side of the
+    match with no separator means it isn't a standalone secret-name hit).
+    A legitimate whole-word hit like ``SECRET_KEY`` or ``api_key`` (where
+    what follows/precedes is a separator, or nothing) still fires. Shared by
+    every detector that does secret-name matching on an identifier, so the
+    rejection logic lives in one place, not one copy per call site."""
+    if not name:
+        return False
+    m = _SECRET_NAME.search(name)
+    if not m:
+        return False
+    start, end = m.span()
+    before = name[start - 1] if start > 0 else ""
+    after = name[end] if end < len(name) else ""
+    if before.isalpha():
+        return False
+    if after.isalpha():
+        return False
+    return True
 
 
 def _dotted(node: ast.AST) -> str:
@@ -187,7 +214,14 @@ class SecretHandlingDetector(Detector):
             # actual identifier/property name matching the secret-name
             # heuristic does.
             code_only = _JS_STRING_LITERAL.sub("", arg_text)
-            if _SECRET_NAME.search(code_only):
+            # Word-boundary-aware (cheap-win fix, 2026-07-22): a bare
+            # _SECRET_NAME.search would also fire on a name that merely
+            # CONTAINS a secret-vocabulary substring glued inside a longer,
+            # unrelated identifier (apiKeyValidator.isValid,
+            # tokenizerConfig.version) -- check each identifier token
+            # against the same word-boundary guard the sibling
+            # secret-leak-via-tool-response detector already uses.
+            if any(_name_looks_secret(tok) for tok in _IDENT.findall(code_only)):
                 out.append(Finding(
                     vuln_class="secret-in-log",
                     title="Secret-named value passed to a log call",
