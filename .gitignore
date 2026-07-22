@@ -9,3 +9,7 @@ build/
 .env
 .env.*
 !.env.example
+
+# Internal strategy/outreach drafts -- never publish (public repo)
+docs/GTM-MANAGED-WATCH.md
+staged/scan-tier-outreach-DRAFT-*.md
