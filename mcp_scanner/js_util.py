@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 
-JS_SUFFIXES = {".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"}
+JS_SUFFIXES = {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx"}
 
 
 def is_comment_line(line: str) -> bool:
