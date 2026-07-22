@@ -39,7 +39,7 @@ from ..models import Finding, Severity, Confidence
 from .. import js_util
 from ..tool_registry import extract_tool_registry
 from .base import Detector, RepoContext, SourceFile
-from .secret_handling import _SECRET_NAME, _SECRET_VALUE_PATTERNS
+from .secret_handling import _SECRET_NAME, _SECRET_VALUE_PATTERNS, _JS_STRING_LITERAL
 
 _WHOLE_OBJECT_NAME = {"config", "settings", "cfg", "conf", "env", "environment", "secrets"}
 
@@ -233,10 +233,14 @@ class SecretLeakResponseDetector(Detector):
         Line-based brace-depth tracking, not a real parser: activates on a
         line matching `return {`, tracks net brace depth per line, and stops
         once depth returns to zero. Good enough for the common one-field-
-        per-line object-literal style; a compressed one-line `return {a:1}`
-        is intentionally not decomposed (a stated limit, not a crash risk --
-        the whole-object and process.env checks above still catch it if it
-        matches those shapes)."""
+        per-line object-literal style. Brace counting strips string-literal
+        contents first (P1b fix) so a stray '}' inside a string VALUE
+        (e.g. `note: "status is ok }"`) can't fool the depth tracker into
+        closing the window before a later field is reached -- the depth
+        count and the key/value extraction below deliberately use different
+        text: braces are counted on the string-stripped copy, but the key
+        and value themselves are still read from the original line so a
+        real value like `apiKey: "sk-..."` isn't corrupted."""
         out: list[tuple[int, str, str]] = []
         depth = 0
         active = False
@@ -244,14 +248,15 @@ class SecretLeakResponseDetector(Detector):
             if js_util.is_comment_line(raw_line):
                 continue
             line = js_util.code_part(raw_line)
+            brace_only = _JS_STRING_LITERAL.sub("", line)
             if not active:
-                if re.search(r"\breturn\s*\{", line):
+                if re.search(r"\breturn\s*\{", brace_only):
                     active = True
-                    depth = line.count("{") - line.count("}")
+                    depth = brace_only.count("{") - brace_only.count("}")
                     if depth <= 0:
                         active = False
                 continue
-            depth += line.count("{") - line.count("}")
+            depth += brace_only.count("{") - brace_only.count("}")
             km = _JS_OBJECT_KEY.match(line)
             if km:
                 out.append((i, km.group(1), km.group(2).strip()))
