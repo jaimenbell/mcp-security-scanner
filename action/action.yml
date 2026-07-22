@@ -1,7 +1,7 @@
 # Managed MCP Watch -- composite GitHub Action.
 #
 # Runs the (MIT, public) mcp-security-scanner against the CLIENT'S repo,
-# inside the CLIENT'S CI. Egress contract (docs/SAAS-TIER-SPEC.md section 3):
+# inside the CLIENT'S CI. Egress contract (counts-only, opt-in, off by default):
 #
 #   * The client's source code NEVER leaves the client's runner.
 #   * The full client report is uploaded to the CLIENT'S artifact store only.
