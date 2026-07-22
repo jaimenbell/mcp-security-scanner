@@ -67,6 +67,23 @@ _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bDROP\s+(TABLE|DATABASE)\b", re.IGNORECASE), "DROP TABLE/DATABASE"),
     (re.compile(r"schtasks\s+/delete\b", re.IGNORECASE), "schtasks /delete"),
     (re.compile(r"\baws\s+s3\s+rm\b.*--recursive\b", re.IGNORECASE), "aws s3 rm --recursive"),
+    # --- backlog #1 (2026-07-21 fleet self-audit): PowerShell-native
+    # destructive-task patterns. 'Remove-Item -Recurse -Force' was already
+    # covered above (verified, no change needed).
+    #
+    # Two candidate siblings were evaluated and deliberately NOT added, both
+    # for the same reason -- reversible (no data/task loss, just a state
+    # flip or a process restart) AND confirmed, via live regression scan, to
+    # fire on legitimate fleet code with no real reliability signal:
+    #   - 'Disable-ScheduledTask': fires in 5+ tracked register_*.ps1
+    #     scripts under the "register disabled, operator arms later"
+    #     convention (shared repo).
+    #   - 'Stop-Process -Force': fires on exit-strategy-portal's
+    #     consumer_smoke.ps1:44, a `finally`-block cleanup of the script's
+    #     OWN throwaway child process -- a normal teardown pattern, not a
+    #     hazard.
+    # Both would have regressed the zero-new-findings fleet gate.
+    (re.compile(r"\bUnregister-ScheduledTask\b", re.IGNORECASE), "Unregister-ScheduledTask"),
 ]
 _CONFIRM_FALSE = re.compile(r"-Confirm\s*:\s*\$false", re.IGNORECASE)
 _INLINE_CONFIRM_GATE = re.compile(r"-WhatIf\b|--dry-run\b|-Confirm\b(?!\s*:\s*\$false)", re.IGNORECASE)
@@ -74,11 +91,59 @@ _FILE_CONFIRM_HINT = re.compile(
     r"(dry[_-]?run|read\s+-p\b|Read-Host\b|\bconfirm|\bapproval\b)", re.IGNORECASE
 )
 
+# --- benign-idempotent-register suppressor (backlog #1) ---------------------
+# The fleet's own register_*.ps1 scripts legitimately unregister-then-
+# reregister the SAME task name (idempotent re-registration on every run).
+# That pattern is benign and must not flag, even though it uses
+# -Confirm:$false. Matched by task-name TOKEN equality (variable name or
+# quoted literal) between the Unregister-ScheduledTask call and a LATER
+# Register-ScheduledTask call in the same file -- a same-file regex
+# heuristic, not a real PowerShell parser, consistent with this detector's
+# stated honesty note.
+_TASKNAME_ARG = re.compile(r"-TaskName\s+(\S+)", re.IGNORECASE)
+_REGISTER_CALL = re.compile(r"\bRegister-ScheduledTask\b", re.IGNORECASE)
+
+
+def _taskname_token(line_text: str) -> str | None:
+    m = _TASKNAME_ARG.search(line_text)
+    if not m:
+        return None
+    return m.group(1).strip("'\"`,")
+
+
+def _has_matching_reregister(full_text: str, task_token: str, after_pos: int) -> bool:
+    for m in _REGISTER_CALL.finditer(full_text, after_pos):
+        window = full_text[m.end(): m.end() + 500]
+        tn = _TASKNAME_ARG.search(window)
+        if tn and tn.group(1).strip("'\"`,") == task_token:
+            return True
+    return False
+
+
+def _line_start_offsets(lines: list[str]) -> list[int]:
+    offsets = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+    return offsets
+
 # --- 3. success-reported-without-verification -------------------------------
 _OR_TRUE = re.compile(r"\|\|\s*true\b")
 _EXIT_0_AFTER_CMD = re.compile(r";\s*exit\s+0\s*$")
 _CONTINUE_ON_ERROR = re.compile(r"continue-on-error\s*:\s*true", re.IGNORECASE)
 _EMPTY_CATCH = re.compile(r"catch\s*\{\s*\}", re.IGNORECASE)
+
+# --- unverified-success suppressor (backlog #2) ------------------------------
+# An empty catch {} should not flag when the SAME file verifiably checks
+# success downstream: a variable set in the try block, then asserted after
+# (e.g. 'if (-not $ok) { throw ... }'). Implemented conservatively -- only
+# this narrow, well-defined idiom suppresses; anything else keeps the flag
+# (over-flag by design, per this detector's honesty note).
+_DOWNSTREAM_SUCCESS_GUARD = re.compile(
+    r"if\s*\(\s*(?:-not\s+\$\w+|!\s*\$\w+)\s*\)\s*\{[^}]*\b(throw|exit\s+1)\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _line_of(text: str, pos: int) -> int:
@@ -106,6 +171,22 @@ def _is_comment_line(line: str, suffix: str) -> bool:
     if suffix in _BATCH_COMMENT_SUFFIXES and (stripped.startswith("::") or _REM_PREFIX.match(line)):
         return True
     return False
+
+
+# --- inline comment-tail stripping (backlog #4, 2026-07-21 fleet self-audit) -
+# A destructive/scope pattern that only appears in a trailing ` # comment`
+# tail is documentation, not a hazard -- strip the tail before matching. This
+# is additive to (not a replacement for) the full-comment-line skip above: a
+# real command with a trailing comment (`rm -rf x  # note`) still matches,
+# because the pattern lives in the code part before the '#', which this
+# strips *out* of, not away.
+_INLINE_HASH_TAIL = re.compile(r"(?<=\s)#.*$")
+
+
+def _code_part(line: str, suffix: str) -> str:
+    if suffix in _HASH_COMMENT_SUFFIXES:
+        return _INLINE_HASH_TAIL.sub("", line)
+    return line
 
 
 class JobHazardsDetector(Detector):
@@ -138,7 +219,8 @@ class JobHazardsDetector(Detector):
         for i, line_text in enumerate(f.lines, start=1):
             if _is_comment_line(line_text, f.suffix):
                 continue
-            if _ICACLS_EVERYONE_FULL.search(line_text) or _CHMOD_777.search(line_text):
+            code_line = _code_part(line_text, f.suffix)
+            if _ICACLS_EVERYONE_FULL.search(code_line) or _CHMOD_777.search(code_line):
                 out.append(self._f(
                     "job-overbroad-scope", "Filesystem ACL grants full control to everyone",
                     Severity.P1, Confidence.HIGH, f, i,
@@ -162,13 +244,17 @@ class JobHazardsDetector(Detector):
     # --- 2. destructive call, no confirm gate -------------------------------
     def _destructive(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
+        offsets = _line_start_offsets(f.lines)
         for i, line_text in enumerate(f.lines, start=1):
             if _is_comment_line(line_text, f.suffix):
                 continue
+            code_line = _code_part(line_text, f.suffix)
             for pat, label in _DESTRUCTIVE_PATTERNS:
-                if not pat.search(line_text):
+                if not pat.search(code_line):
                     continue
-                if _CONFIRM_FALSE.search(line_text):
+                if label == "Unregister-ScheduledTask" and self._benign_reregister(f, code_line, offsets[i - 1]):
+                    break  # idempotent unregister-then-reregister of the same task: benign
+                if _CONFIRM_FALSE.search(code_line):
                     out.append(self._f(
                         "job-destructive-no-confirm",
                         f"Destructive call ({label}) with confirmation explicitly disabled",
@@ -179,7 +265,7 @@ class JobHazardsDetector(Detector):
                         "gate) so a human or an env-flag confirms before this runs.",
                     ))
                     break
-                if _INLINE_CONFIRM_GATE.search(line_text):
+                if _INLINE_CONFIRM_GATE.search(code_line):
                     break  # gated inline (-WhatIf / --dry-run / -Confirm)
                 if _FILE_CONFIRM_HINT.search(f.text):
                     break  # same-file heuristic: a confirm/dry-run gate exists somewhere
@@ -196,13 +282,25 @@ class JobHazardsDetector(Detector):
                 break
         return out
 
+    @staticmethod
+    def _benign_reregister(f: SourceFile, code_line: str, line_start: int) -> bool:
+        """True iff this Unregister-ScheduledTask call names a task that a
+        LATER Register-ScheduledTask call in the same file re-registers under
+        the identical token (variable or quoted literal) -- the fleet's
+        idempotent register_*.ps1 convention (backlog #1 suppressor)."""
+        token = _taskname_token(code_line)
+        if not token:
+            return False
+        return _has_matching_reregister(f.text, token, line_start)
+
     # --- 3. success reported without verification ---------------------------
     def _unverified(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
         for i, line_text in enumerate(f.lines, start=1):
             if _is_comment_line(line_text, f.suffix):
                 continue
-            if _OR_TRUE.search(line_text):
+            code_line = _code_part(line_text, f.suffix)
+            if _OR_TRUE.search(code_line):
                 out.append(self._f(
                     "job-unverified-success", "Command's exit status masked with '|| true'",
                     Severity.P2, Confidence.MEDIUM, f, i,
@@ -211,7 +309,7 @@ class JobHazardsDetector(Detector):
                     "Remove '|| true'; let the job fail loudly, or explicitly check "
                     "and log the real exit code before deciding to continue.",
                 ))
-            if _EXIT_0_AFTER_CMD.search(line_text):
+            if _EXIT_0_AFTER_CMD.search(code_line):
                 out.append(self._f(
                     "job-unverified-success", "Script exits 0 unconditionally after a command",
                     Severity.P2, Confidence.MEDIUM, f, i,
@@ -221,7 +319,7 @@ class JobHazardsDetector(Detector):
                     "Propagate the real exit code ('exit $?' / check '$LASTEXITCODE') "
                     "instead of hardcoding success.",
                 ))
-            if _CONTINUE_ON_ERROR.search(line_text):
+            if _CONTINUE_ON_ERROR.search(code_line):
                 out.append(self._f(
                     "job-unverified-success", "Workflow step continues on error unconditionally",
                     Severity.P2, Confidence.MEDIUM, f, i,
@@ -231,17 +329,21 @@ class JobHazardsDetector(Detector):
                     "Remove 'continue-on-error', or capture the step outcome and gate "
                     "on it explicitly later in the job.",
                 ))
-        for m in _EMPTY_CATCH.finditer(f.text):
-            line = _line_of(f.text, m.start())
-            out.append(self._f(
-                "job-unverified-success", "Empty catch block silently swallows a failure",
-                Severity.P1, Confidence.HIGH, f, line,
-                "An empty PowerShell 'catch {}' block discards the exception with no "
-                "log, no rethrow, and no failure signal -- the wrapper can exit 0 even "
-                "though the guarded operation threw.",
-                "Log the exception and rethrow (or explicitly set a non-zero exit "
-                "code) instead of an empty catch block.",
-            ))
+        # backlog #2 suppressor: an empty catch is not a hazard when the same
+        # file verifiably checks success downstream (conservative -- narrow
+        # idiom only, over-flag otherwise).
+        if not _DOWNSTREAM_SUCCESS_GUARD.search(f.text):
+            for m in _EMPTY_CATCH.finditer(f.text):
+                line = _line_of(f.text, m.start())
+                out.append(self._f(
+                    "job-unverified-success", "Empty catch block silently swallows a failure",
+                    Severity.P1, Confidence.HIGH, f, line,
+                    "An empty PowerShell 'catch {}' block discards the exception with no "
+                    "log, no rethrow, and no failure signal -- the wrapper can exit 0 even "
+                    "though the guarded operation threw.",
+                    "Log the exception and rethrow (or explicitly set a non-zero exit "
+                    "code) instead of an empty catch block.",
+                ))
         return out
 
     def _f(self, vc, title, sev, conf, f: SourceFile, line, detail, remediation) -> Finding:
