@@ -42,6 +42,64 @@ _JS_CHILD_PROCESS_IMPORT = re.compile(
 )
 _JS_EXEC_CALL = re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")
 _JS_SPAWN_EXECFILE_CALL = re.compile(r"\b(?:child_process\.)?(?:spawn|execFile)(?:Sync)?\s*\(")
+
+# --- P1d: destructure-aliased child_process bindings ---------------------
+# `const { exec: run } = require('child_process')` (require form) or
+# `import { exec as run } from 'child_process'` (import form) rebinds the
+# sink under a name the fixed regexes above never see -- calls to the alias
+# (`run(...)`) were a total blind spot. Parsed separately per-file and the
+# alias names folded into the same exec / spawn-execFile sink checks.
+_JS_CP_DESTRUCTURE_REQUIRE = re.compile(
+    r"""\{([^}]*)\}\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\)"""
+)
+_JS_CP_DESTRUCTURE_IMPORT = re.compile(
+    r"""import\s*\{([^}]*)\}\s*from\s*['"](?:node:)?child_process['"]"""
+)
+_JS_CP_BINDING_ITEM = re.compile(
+    r"^([A-Za-z_$][\w$]*)\s*(?::|as)\s*([A-Za-z_$][\w$]*)$|^([A-Za-z_$][\w$]*)$"
+)
+_EXEC_BIND_NAMES = {"exec", "execSync"}
+_SPAWN_EXECFILE_BIND_NAMES = {"spawn", "execFile", "spawnSync", "execFileSync"}
+
+
+def _js_child_process_aliases(text: str) -> tuple[set[str], set[str]]:
+    """Return (exec_aliases, spawn_execfile_aliases) bound via a
+    destructured child_process require/import, including any `: alias`
+    (require) / `as alias` (import) rename. Plain (non-aliased) bindings
+    fold back to their own name, so this also covers the un-renamed case
+    uniformly with the regex-literal checks above."""
+    exec_names: set[str] = set()
+    spawn_names: set[str] = set()
+
+    def _consume(members: str) -> None:
+        for item in members.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            m = _JS_CP_BINDING_ITEM.match(item)
+            if not m:
+                continue
+            if m.group(3):
+                orig = alias = m.group(3)
+            else:
+                orig, alias = m.group(1), m.group(2)
+            if orig in _EXEC_BIND_NAMES:
+                exec_names.add(alias)
+            elif orig in _SPAWN_EXECFILE_BIND_NAMES:
+                spawn_names.add(alias)
+
+    for m in _JS_CP_DESTRUCTURE_REQUIRE.finditer(text):
+        _consume(m.group(1))
+    for m in _JS_CP_DESTRUCTURE_IMPORT.finditer(text):
+        _consume(m.group(1))
+    return exec_names, spawn_names
+
+
+def _js_alias_call(line: str, names: set[str]) -> bool:
+    if not names:
+        return False
+    pat = re.compile(r"\b(?:" + "|".join(re.escape(n) for n in names) + r")\s*\(")
+    return bool(pat.search(line))
 _JS_SHELL_TRUE = re.compile(r"shell\s*:\s*true", re.IGNORECASE)
 _JS_EVAL_CALL = re.compile(r"\beval\s*\(")
 _JS_NEW_FUNCTION = re.compile(r"\bnew\s+Function\s*\(")
@@ -95,6 +153,8 @@ class ParamInjectionDetector(Detector):
         out: list[Finding] = []
         text = f.text
         has_child_process = bool(_JS_CHILD_PROCESS_IMPORT.search(text))
+        exec_aliases, spawn_aliases = _js_child_process_aliases(text)
+        has_child_process = has_child_process or bool(exec_aliases) or bool(spawn_aliases)
         has_containment = any(h in text for h in _CONTAINMENT_HINTS)
         has_allowlist = any(h in text for h in _ALLOWLIST_HINTS)
 
@@ -104,7 +164,7 @@ class ParamInjectionDetector(Detector):
             line = js_util.code_part(raw_line)
 
             if has_child_process:
-                if _JS_EXEC_CALL.search(line):
+                if _JS_EXEC_CALL.search(line) or _js_alias_call(line, exec_aliases):
                     out.append(self._f(
                         "shell-injection", "child_process.exec(Sync) invocation",
                         Severity.P1, Confidence.HIGH, f, i,
@@ -115,7 +175,7 @@ class ParamInjectionDetector(Detector):
                         "default). If a shell is unavoidable, escape every "
                         "interpolated value and reject metacharacters.",
                     ))
-                m = _JS_SPAWN_EXECFILE_CALL.search(line)
+                m = _JS_SPAWN_EXECFILE_CALL.search(line) or _js_alias_call(line, spawn_aliases)
                 if m and _JS_SHELL_TRUE.search(line):
                     out.append(self._f(
                         "shell-injection", "spawn/execFile called with shell:true",
