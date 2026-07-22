@@ -38,7 +38,7 @@ _ALLOWLIST_HINTS = (
 # this scanner. Mirrors the same sink classes the Python AST pass checks:
 # shell-injection, code-eval, unsafe-deserialization, ssrf, path-traversal.
 _JS_CHILD_PROCESS_IMPORT = re.compile(
-    r"""require\(\s*['"]child_process['"]\s*\)|from\s+['"]child_process['"]"""
+    r"""require\(\s*['"](?:node:)?child_process['"]\s*\)|from\s+['"](?:node:)?child_process['"]"""
 )
 _JS_EXEC_CALL = re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")
 _JS_SPAWN_EXECFILE_CALL = re.compile(r"\b(?:child_process\.)?(?:spawn|execFile)(?:Sync)?\s*\(")
