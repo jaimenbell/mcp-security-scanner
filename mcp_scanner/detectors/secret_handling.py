@@ -66,6 +66,61 @@ _JS_STRING_LITERAL = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|
 _IDENT = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
 
+def _js_template_interpolations(text: str) -> list[str]:
+    """Raw expression text inside every ``${...}`` interpolation found
+    within a backtick TEMPLATE literal in ``text``.
+
+    Only backtick spans are inspected -- a '${' inside a plain '...'/"..."
+    string is literal text in real JS (no interpolation there), so it is
+    deliberately never treated as one; a fixture proves this stays quiet
+    rather than false-positiving or crashing on it. Nested braces inside
+    the interpolation (e.g. an object literal) are depth-tracked so the
+    extraction doesn't cut short at the first inner '}'.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"":
+            quote = c
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == "`":
+            i += 1
+            while i < n and text[i] != "`":
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == "$" and i + 1 < n and text[i + 1] == "{":
+                    depth = 1
+                    j = i + 2
+                    start = j
+                    while j < n and depth > 0:
+                        if text[j] == "{":
+                            depth += 1
+                        elif text[j] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        j += 1
+                    out.append(text[start:j])
+                    i = j + 1
+                    continue
+                i += 1
+            i += 1  # skip closing backtick (or run off the end -- best-effort)
+            continue
+        i += 1
+    return out
+
+
 def _name_looks_secret(name: str) -> bool:
     """``_SECRET_NAME`` (reused as-is) with a word-boundary guard so a
     substring glued inside a longer, unrelated word doesn't count -- e.g.
@@ -209,11 +264,19 @@ class SecretHandlingDetector(Detector):
             if not m:
                 continue
             arg_text = line[m.end():]
+            # Template-literal interpolations (P2 fix, 2026-07-22 verify
+            # pass): `${apiKey}` is real code, not message prose, but the
+            # blanket string-strip below treats the WHOLE backtick span as
+            # one opaque literal and deletes it -- pull the ${...} contents
+            # back out first so an interpolated secret identifier survives.
+            interpolations = _js_template_interpolations(arg_text)
             # Strip string-literal contents so log MESSAGE prose (e.g.
             # "token required but not shown") never triggers this -- only an
             # actual identifier/property name matching the secret-name
             # heuristic does.
             code_only = _JS_STRING_LITERAL.sub("", arg_text)
+            if interpolations:
+                code_only = code_only + " " + " ".join(interpolations)
             # Word-boundary-aware (cheap-win fix, 2026-07-22): a bare
             # _SECRET_NAME.search would also fire on a name that merely
             # CONTAINS a secret-vocabulary substring glued inside a longer,
