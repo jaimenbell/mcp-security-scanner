@@ -85,6 +85,29 @@ def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
 
+# --- comment-line awareness (precision fix, 2026-07-21 fleet self-audit) -----
+# A destructive/scope pattern that only appears in a full-comment line is
+# documentation or a safety-tool's own pattern list -- never executed, never a
+# hazard. Suppressing full-comment lines is a pure-precision win (zero recall
+# cost: a real call would not be commented out). Only *full* comment lines are
+# skipped; a real command with a trailing comment (`rm -rf x  # note`) still
+# matches, so live code is never masked.
+_HASH_COMMENT_SUFFIXES = {".sh", ".bash", ".ps1", ".yml", ".yaml", ".service", ".timer"}
+_BATCH_COMMENT_SUFFIXES = {".bat", ".cmd"}
+_REM_PREFIX = re.compile(r"^\s*rem\b", re.IGNORECASE)
+
+
+def _is_comment_line(line: str, suffix: str) -> bool:
+    stripped = line.lstrip()
+    if not stripped:
+        return False
+    if suffix in _HASH_COMMENT_SUFFIXES and stripped.startswith("#"):
+        return True
+    if suffix in _BATCH_COMMENT_SUFFIXES and (stripped.startswith("::") or _REM_PREFIX.match(line)):
+        return True
+    return False
+
+
 class JobHazardsDetector(Detector):
     name = "job-hazards"
 
@@ -113,6 +136,8 @@ class JobHazardsDetector(Detector):
                 "the scopes this job uses (e.g. 'contents: read', 'deployments: write').",
             ))
         for i, line_text in enumerate(f.lines, start=1):
+            if _is_comment_line(line_text, f.suffix):
+                continue
             if _ICACLS_EVERYONE_FULL.search(line_text) or _CHMOD_777.search(line_text):
                 out.append(self._f(
                     "job-overbroad-scope", "Filesystem ACL grants full control to everyone",
@@ -138,6 +163,8 @@ class JobHazardsDetector(Detector):
     def _destructive(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
         for i, line_text in enumerate(f.lines, start=1):
+            if _is_comment_line(line_text, f.suffix):
+                continue
             for pat, label in _DESTRUCTIVE_PATTERNS:
                 if not pat.search(line_text):
                     continue
@@ -173,6 +200,8 @@ class JobHazardsDetector(Detector):
     def _unverified(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
         for i, line_text in enumerate(f.lines, start=1):
+            if _is_comment_line(line_text, f.suffix):
+                continue
             if _OR_TRUE.search(line_text):
                 out.append(self._f(
                     "job-unverified-success", "Command's exit status masked with '|| true'",
