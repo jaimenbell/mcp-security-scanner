@@ -253,9 +253,15 @@ def test_full_run_leaks_no_target_name_into_tracked_files(tmp_path):
     if scratch.exists():
         shutil.rmtree(scratch)
 
+    # Runtime-unique target names so the sentinel provably cannot pre-exist
+    # in ANY source file (incl. this test file) -- any appearance in a
+    # tracked file is then unambiguously a leak the scan caused.
+    import uuid
+    run_a = "ecoLEAKPROBE" + uuid.uuid4().hex
+    run_b = "ecoLEAKPROBE" + uuid.uuid4().hex
     cfg = _write_config(tmp_path, [
-        {"name": SENTINEL_A, "location": VULN},
-        {"name": SENTINEL_B, "location": CLEAN},
+        {"name": run_a, "location": VULN},
+        {"name": run_b, "location": CLEAN},
     ])
     try:
         summary = eco.run_ecosystem_scan(cfg, out_dir=out_dir, scratch_dir=scratch)
@@ -287,12 +293,12 @@ def test_full_run_leaks_no_target_name_into_tracked_files(tmp_path):
                 text = fp.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            assert SENTINEL_A not in text, f"sentinel leaked into tracked {rel}"
-            assert SENTINEL_B not in text, f"sentinel leaked into tracked {rel}"
+            assert run_a not in text, f"sentinel leaked into tracked {rel}"
+            assert run_b not in text, f"sentinel leaked into tracked {rel}"
 
         # the aggregate itself is anonymized even though it lives private
         agg_md = (out_dir / "aggregate-report.md").read_text(encoding="utf-8")
-        assert SENTINEL_A not in agg_md and SENTINEL_B not in agg_md
+        assert run_a not in agg_md and run_b not in agg_md
     finally:
         if out_dir.exists():
             shutil.rmtree(out_dir)
