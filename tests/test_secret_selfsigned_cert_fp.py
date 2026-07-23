@@ -98,6 +98,24 @@ def test_mismatched_key_beside_unrelated_selfsigned_cert_still_flagged():
     assert tf, "a key that does NOT cryptographically match its sibling cert must still flag"
 
 
+def test_prod_shaped_selfsigned_cert_at_test_path_still_flagged():
+    # Round-2 N-vote P0-4 repro (live): self-signed + test-path alone
+    # discriminates NOTHING real -- issuer==subject is true of internal-CA
+    # PRODUCTION roots too, and integration test suites routinely embed
+    # real staging/prod TLS material under tests/. This fixture is
+    # self-signed, sits at a test-fixture path, but has a prod-shaped
+    # identity (CN=payments-api.mycompany-prod.internal, no localhost/
+    # test/example marker), a ~10-year validity, and a normal 2048-bit RSA
+    # key -- it must stay flagged.
+    ctx = RepoContext(
+        root=PEM_DIR.parent.parent,
+        files=[], tracked={"fixtures/pem_material/prod_shaped_selfsigned/cert.pem"}, is_git=True,
+    )
+    findings = SecretHandlingDetector().run(ctx)
+    tf = [f for f in findings if f.vuln_class == "tracked-secret-file"]
+    assert tf, "a self-signed cert with a prod-shaped identity must still flag even at a test path"
+
+
 def test_key_without_sibling_cert_still_flagged():
     # Isolated directory with only the key present -- no sibling cert.
     ctx = RepoContext(
