@@ -121,6 +121,47 @@ def _js_template_interpolations(text: str) -> list[str]:
     return out
 
 
+# --- Wave-1 FP fix (a): pagination/continuation-cursor field names --------
+# Evidence (staged/ecosystem-scan-2026-07-23): every non-test
+# secret-leak-via-tool-response finding in the ecosystem scan was a
+# `next_token`/`cursor`-style pagination field -- an opaque, server-issued
+# continuation handle, not a credential (e.g. AWS's own
+# `ListTranslationJobs` pagination token). Demotion requires BOTH the
+# pagination word-shape (next/page/continuation combined with token/cursor,
+# or a bare 'cursor') AND the absence of any stronger credential word in the
+# same identifier -- ``access_token``/``refresh_token``/``client_secret``/
+# ``page_token_secret`` never demote even though they also contain
+# token/page/cursor substrings, because the credential word is still there.
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_PAGINATION_PREFIX_WORDS = {"next", "page", "continuation"}
+_PAGINATION_CORE_WORDS = {"token", "cursor"}
+_PAGINATION_EXCLUDE_WORDS = {
+    "access", "refresh", "auth", "secret", "password", "passwd", "client",
+    "bearer", "session", "private", "csrf", "id", "api", "key",
+}
+
+
+def _name_words(name: str) -> list[str]:
+    """Split an identifier into lowercase words on underscores/hyphens and
+    camelCase boundaries -- e.g. ``result_next_token`` or ``resultNextToken``
+    both become ``["result", "next", "token"]``."""
+    split = _CAMEL_BOUNDARY.sub("_", name)
+    return [w.lower() for w in re.split(r"[^A-Za-z0-9]+", split) if w]
+
+
+def _is_pagination_cursor_name(name: str) -> bool:
+    words = set(_name_words(name))
+    if not words:
+        return False
+    if words & _PAGINATION_EXCLUDE_WORDS:
+        return False
+    if "cursor" in words:
+        return True
+    if (words & _PAGINATION_PREFIX_WORDS) and (words & _PAGINATION_CORE_WORDS):
+        return True
+    return False
+
+
 def _name_looks_secret(name: str) -> bool:
     """``_SECRET_NAME`` (reused as-is) with a word-boundary guard so a
     substring glued inside a longer, unrelated word doesn't count -- e.g.
@@ -143,6 +184,8 @@ def _name_looks_secret(name: str) -> bool:
     if before.isalpha():
         return False
     if after.isalpha():
+        return False
+    if _is_pagination_cursor_name(name):
         return False
     return True
 
@@ -300,10 +343,15 @@ class SecretHandlingDetector(Detector):
         return out
 
     def _arg_mentions_secret(self, call: ast.Call) -> bool:
+        # Wave-1 fix: route through the shared _name_looks_secret helper
+        # (word-boundary + pagination-cursor guard) instead of a raw
+        # _SECRET_NAME.search -- this call site was the one Python path that
+        # still bypassed both guards, and is the exact site the ecosystem
+        # scan's `logger.debug(f'Received next_token: ...')` FP came through.
         for a in list(call.args) + [kw.value for kw in call.keywords]:
             for sub in ast.walk(a):
-                if isinstance(sub, ast.Name) and _SECRET_NAME.search(sub.id):
+                if isinstance(sub, ast.Name) and _name_looks_secret(sub.id):
                     return True
-                if isinstance(sub, ast.Attribute) and _SECRET_NAME.search(sub.attr):
+                if isinstance(sub, ast.Attribute) and _name_looks_secret(sub.attr):
                     return True
         return False
