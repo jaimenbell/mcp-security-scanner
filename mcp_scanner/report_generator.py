@@ -148,9 +148,18 @@ def load_scan(path: "str | Path", target: "str | None" = None) -> dict:
     """
     p = Path(path)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        raw = p.read_bytes()
     except OSError as e:
         raise ReportInputError(f"cannot read scan JSON {p}: {e}") from e
+    # Windows-shell redirects (`mcp-scan ... --json > scan.json` in
+    # PowerShell 5.1) produce BOM'd UTF-8 or UTF-16 files; accept both
+    # rather than failing on the operator's own most common workflow.
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = raw.decode("utf-16")
+    else:
+        text = raw.decode("utf-8-sig")
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError as e:
         raise ReportInputError(f"{p} is not valid JSON: {e}") from e
 
