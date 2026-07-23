@@ -36,29 +36,57 @@ _SECRET_VALUE_PATTERNS = [
     (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b"), "Bearer-prefixed token"),
 ]
 
-# Live fleet-sweep catch (round-2, post P1-5): the Bearer-prefixed pattern
-# alone flagged github-mcp's OWN test fixture --
-# `"Bearer github_pat_fake_test_token_1234"` -- an obviously-named fake
-# value, not a real secret. Unlike AKIA/ghp_/sk-/xox* (precise because
-# their literal PROVIDER PREFIX already narrows them), "Bearer <20+ chars>"
-# and the JWT shape are broad backstop patterns with no such built-in
-# precision, so they get one extra guard: a real high-entropy secret
-# essentially never spells out an English word like "fake"/"test"/"dummy"
-# as a substring of a randomly-generated token; a value that does is
-# almost certainly a deliberately-named test fixture.
-_FAKE_VALUE_MARKERS = re.compile(
-    r"fake|dummy|placeholder|sample|xxxx|demo\b", re.IGNORECASE
-)
-_ENTROPY_GATED_LABELS = {"Bearer-prefixed token", "JWT-shaped token"}
+# --- Round-3 N-vote P0-A fix: fake-marker DEMOTES, never suppresses ------
+# Round-2's version of this guard (`_is_real_secret_value_match`) was an
+# unanchored substring FULL-SUPPRESS (`continue`, no trace) -- exactly the
+# "special-case exception to the one law" both refuters killed live:
+# `PROD_API_KEY = "sample-tier-<68 real hex chars>"` (a genuine secret
+# whose value merely CONTAINS "sample" as an unrelated tenant/tier
+# component) vanished to zero findings. There is now exactly ONE rule in
+# this whole module: full suppression is reserved for OUR OWN curated
+# exact-match judgment (`_is_known_placeholder_secret`); every other
+# signal -- pragma comments, fake-looking markers -- may only demote
+# confidence to LOW and tag the finding, never drop it. Markers are
+# word-boundary matched (bare substring matching was itself part of the
+# round-2 failure) and applied uniformly to every `_SECRET_VALUE_PATTERNS`
+# match, not gated to a special-cased subset of labels.
+_FAKE_MARKER_WORDS = {"fake", "dummy", "placeholder", "sample", "demo", "test"}
+_XXXX_MARKER = re.compile(r"x{4,}", re.IGNORECASE)
 
 
-def _is_real_secret_value_match(what: str, value: str) -> bool:
-    """Extra precision guard applied ONLY to the newer, broader
-    backstop patterns (see ``_ENTROPY_GATED_LABELS``) -- established,
-    provider-prefixed patterns are unaffected."""
-    if what in _ENTROPY_GATED_LABELS and _FAKE_VALUE_MARKERS.search(value):
-        return False
-    return True
+def _has_fake_marker(value: str) -> bool:
+    """True when ``value`` contains an explicit fake/dummy/placeholder/
+    sample/demo/test marker as a genuine WHOLE WORD, tokenized the same
+    way ``_name_words`` tokenizes identifiers (splits on non-alphanumeric
+    AND camelCase boundaries) -- NOT a naive regex ``\\b``, which treats
+    underscore as a word character and so finds no boundary at all inside
+    a snake_case identifier like ``github_pat_fake_test_token`` (the
+    round-2 regression this replaces: the naive ``\\bfake\\b`` never
+    matched real fixture values because they're underscore-joined).
+    Separately checks for a run of 4+ ``x`` characters (a common
+    "xxxxxxxx" placeholder shape that isn't a dictionary word). NEVER
+    used to suppress -- see the module note above. A real secret
+    occasionally DOES contain one of these words as an unrelated
+    component (a tenant/tier name, a "test" environment label on a real
+    credential) -- demotion, not suppression, is what keeps that case
+    visible."""
+    words = set(_name_words(value))
+    if words & _FAKE_MARKER_WORDS:
+        return True
+    return bool(_XXXX_MARKER.search(value))
+
+
+def _compose_demotion(conditions: list[tuple[bool, str]]) -> tuple["Confidence", str]:
+    """``conditions``: [(is_true, tag_name), ...]. If ANY condition is
+    True, confidence demotes to LOW and every true tag is joined into a
+    single parenthesized title suffix (e.g. ``" (author-suppressed,
+    fake-marker)"``); multiple independent demotion signals compose,
+    they don't each get their own separate finding. Returns
+    (Confidence.HIGH, "") when nothing demotes."""
+    active = [tag for cond, tag in conditions if cond]
+    if not active:
+        return Confidence.HIGH, ""
+    return Confidence.LOW, f" ({', '.join(active)})"
 
 _SECRET_NAME = re.compile(
     r"(secret|token|password|passwd|api[_-]?key|private[_-]?key|client[_-]?secret)",
@@ -173,21 +201,25 @@ def _is_self_signed_test_cert(path) -> bool:
     return cert.issuer == cert.subject
 
 
-# --- Round-2 N-vote P0-4 fix: test-SHAPED identity, not just self-signed --
+# --- Round-2 N-vote P0-4 fix, tightened round-3 (P0-B) --------------------
 # issuer==subject alone is just "self-signed" -- true of a real internal-CA
 # PRODUCTION root too -- and a test-fixture PATH is trivially true for an
 # integration suite that embeds real staging/prod TLS material under
-# tests/. Live repro: a self-signed cert with CN=payments-api.mycompany-
-# prod.internal, ~10-year validity, sitting under tests/, demoted to
-# invisible under the old two-check rule. Demotion now ALSO requires the
-# cert's own content to look test-shaped.
+# tests/. Round-2's fix added a THIRD check but wired it as an OR-gate
+# (marker OR short-validity OR weak-key): A2 reproduced the P0-4 scenario
+# again verbatim at exactly the 90-day validity boundary (prod CN, normal
+# 2048-bit key) -- validity alone satisfied the OR-gate and demoted it to
+# total invisibility. Round-3 fix: the CN/SAN test-identity marker is now
+# REQUIRED (no OR-gate); validity and key-size are not independently
+# sufficient. A marker match is a real, checkable fact about the cert's
+# own declared identity; a short validity window or a smaller key are
+# common in PLENTY of legitimately-short-lived real internal certs too,
+# so they were never strong enough to justify demoting alone.
 _TEST_IDENTITY_MARKERS = re.compile(
     r"localhost|127\.0\.0\.1|::1|\.local$|\.test$|\.example$|\.invalid$|"
     r"\btest\b|\bdemo\b|\bexample\b|\bdummy\b|\bfixture\b|\bmock\b",
     re.IGNORECASE,
 )
-_MAX_TEST_CERT_VALIDITY_DAYS = 90
-_MIN_PROD_RSA_KEY_BITS = 2048
 
 
 def _cert_identity_names(cert) -> list[str]:
@@ -211,35 +243,25 @@ def _cert_identity_names(cert) -> list[str]:
 def _cert_has_test_shaped_identity(path) -> bool:
     """True when a self-signed cert at ``path`` ALSO looks test-shaped by
     content: its CN/SAN matches a localhost/test/example/demo/dummy/mock/
-    fixture pattern, OR its validity window is short (<= 90 days -- real
-    internal-CA production roots are typically issued for a year or
-    more), OR its RSA key is below common production norms (< 2048 bits).
-    Any ONE of these alone is a soft signal, not proof, but combined with
-    the caller's separate issuer==subject + test-fixture-path checks this
-    is what stops a self-signed, long-validity, prod-FQDN-shaped internal-
-    CA root from demoting purely for living under a tests/ directory.
+    fixture pattern. Round-3 N-vote P0-B fix: this marker is now REQUIRED
+    -- round-2's version OR'd in a short (<= 90 day) validity window or a
+    sub-2048-bit RSA key as INDEPENDENTLY sufficient, and A2 reproduced
+    the original P0-4 scenario again verbatim right at the 90-day
+    boundary (a prod-shaped CN, no marker, normal key size) -- validity
+    alone satisfied the OR-gate and demoted a real-looking cert to total
+    invisibility. Neither validity nor key size is a reliable enough
+    signal to demote on its own (plenty of real, legitimately-short-lived
+    certs exist); only the checkable, explicit CN/SAN marker is. Combined
+    with the caller's separate issuer==subject + test-fixture-path
+    checks, this is what stops a self-signed, prod-FQDN-shaped internal-CA
+    root from demoting purely for living under a tests/ directory --
+    while no longer letting validity/key-size alone stand in for that.
     Fails closed (False) on ImportError/parse error, same convention as
     every other cert check in this module."""
     cert = _parse_x509_cert(path)
     if cert is None:
         return False
-    if any(_TEST_IDENTITY_MARKERS.search(n) for n in _cert_identity_names(cert)):
-        return True
-    try:
-        not_before = getattr(cert, "not_valid_before_utc", None) or cert.not_valid_before
-        not_after = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after
-        if (not_after - not_before).days <= _MAX_TEST_CERT_VALIDITY_DAYS:
-            return True
-    except Exception:
-        pass
-    try:
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        pub = cert.public_key()
-        if isinstance(pub, rsa.RSAPublicKey) and pub.key_size < _MIN_PROD_RSA_KEY_BITS:
-            return True
-    except Exception:
-        pass
-    return False
+    return any(_TEST_IDENTITY_MARKERS.search(n) for n in _cert_identity_names(cert))
 
 
 def _looks_like_private_key_pem(path) -> bool:
@@ -515,20 +537,41 @@ class SecretHandlingDetector(Detector):
         findings: list[Finding] = []
 
         # 1) tracked secret files
+        #
+        # Round-3 N-vote P0-B fix: cert demotion used to be a SILENT
+        # BREAK (`break` -- skip the whole file, zero-trace) -- the exact
+        # class of exception the "one law" rules out. Brought under it:
+        # a demoted test cert still emits a finding, just LOW confidence
+        # and tagged "(test-cert)", never zero-trace.
         for rel in sorted(ctx.tracked):
             if _EXAMPLE_ENV.search(rel):
                 continue
             for pat in _TRACKED_SECRET_FILES:
                 if pat.search(rel):
-                    if _is_test_fixture_path(rel) and self._is_demoted_test_cert(rel, ctx.root):
-                        break
+                    is_demoted = (
+                        _is_test_fixture_path(rel)
+                        and self._is_demoted_test_cert(rel, ctx.root)
+                    )
+                    confidence, tag_suffix = _compose_demotion([
+                        (is_demoted, "test-cert"),
+                    ])
+                    detail = (
+                        "A file that conventionally holds live credentials is "
+                        "committed to the repo; anyone with clone access reads it."
+                    )
+                    if is_demoted:
+                        detail += (
+                            " It is self-signed, at a test-fixture path, and its own "
+                            "content (CN/SAN) looks test-shaped -- likely, but not "
+                            "provably, a throwaway keypair; confidence demoted rather "
+                            "than the finding dropped."
+                        )
                     findings.append(Finding(
                         vuln_class="tracked-secret-file",
-                        title=f"Secret-bearing file tracked in git: {rel}",
-                        severity=Severity.P1, confidence=Confidence.HIGH,
+                        title=f"Secret-bearing file tracked in git: {rel}{tag_suffix}",
+                        severity=Severity.P1, confidence=confidence,
                         file=rel, line=0,
-                        detail="A file that conventionally holds live credentials is "
-                               "committed to the repo; anyone with clone access reads it.",
+                        detail=detail,
                         remediation="Remove from tracking (git rm --cached), add to "
                                     ".gitignore, rotate the exposed credential, and "
                                     "scrub git history.",
@@ -597,33 +640,32 @@ class SecretHandlingDetector(Detector):
                     value = m.group(0)
                     if _is_known_placeholder_secret(value):
                         continue
-                    if not _is_real_secret_value_match(what, value):
-                        continue
+                    confidence, tag_suffix = _compose_demotion([
+                        (has_suppress_comment, "author-suppressed"),
+                        (_has_fake_marker(value), "fake-marker"),
+                    ])
+                    detail = f"A {what} appears as a literal in tracked source."
                     if has_suppress_comment:
-                        out.append(Finding(
-                            vuln_class="hardcoded-secret",
-                            title=f"Hardcoded {what} in source (author-suppressed)",
-                            severity=Severity.P1, confidence=Confidence.LOW,
-                            file=f.rel, line=i,
-                            detail=(
-                                f"A {what} appears as a literal in tracked source. "
-                                "The line carries an author suppress-convention comment "
-                                "(e.g. `# pragma: allowlist secret`) -- in adversarial/"
-                                "third-party scanning this signal is target-controlled "
-                                "and cannot be trusted to fully silence a finding, so "
-                                "confidence is demoted rather than the finding dropped."
-                            ),
-                            remediation="Verify this is genuinely a placeholder, not a "
-                                        "real credential; if real, rotate immediately.",
-                            snippet="<redacted secret line>",
-                        ))
-                        continue
+                        detail += (
+                            " The line carries an author suppress-convention comment "
+                            "(e.g. `# pragma: allowlist secret`) -- in adversarial/"
+                            "third-party scanning this signal is target-controlled "
+                            "and cannot be trusted to fully silence a finding, so "
+                            "confidence is demoted rather than the finding dropped."
+                        )
+                    if _has_fake_marker(value):
+                        detail += (
+                            " The value also contains an explicit fake/dummy/test/"
+                            "placeholder/sample/demo marker -- likely, but not "
+                            "provably, a test fixture; confidence is demoted rather "
+                            "than the finding dropped."
+                        )
                     out.append(Finding(
                         vuln_class="hardcoded-secret",
-                        title=f"Hardcoded {what} in source",
-                        severity=Severity.P1, confidence=Confidence.HIGH,
+                        title=f"Hardcoded {what} in source{tag_suffix}",
+                        severity=Severity.P1, confidence=confidence,
                         file=f.rel, line=i,
-                        detail=f"A {what} appears as a literal in tracked source.",
+                        detail=detail,
                         remediation="Move to an environment variable / secret store, "
                                     "rotate the exposed value, and scrub history.",
                         snippet="<redacted secret line>",
@@ -631,10 +673,10 @@ class SecretHandlingDetector(Detector):
         # AST: NAME = "literal" where NAME looks secret and value looks
         # real. Round-2 N-vote P2-6 fix: this branch was DEAD CODE (see
         # _PLACEHOLDER's docstring above) -- now live, it gets the SAME
-        # two guards _scan_literals already applies: the curated
-        # placeholder list may fully suppress (our own judgment), and a
-        # pragma suppress-comment on the line demotes confidence rather
-        # than dropping the finding (adversarial-mode philosophy, P0-3).
+        # guards _scan_literals already applies: the curated placeholder
+        # list may fully suppress (our own judgment); a pragma
+        # suppress-comment and a fake-value-marker may only demote
+        # confidence and tag the finding (round-3: NEVER continue/drop).
         if f.tree is not None:
             for node in ast.walk(f.tree):
                 if isinstance(node, ast.Assign):
@@ -646,46 +688,54 @@ class SecretHandlingDetector(Detector):
                         continue
                     if _PLACEHOLDER.fullmatch(value) or len(value) < 8:
                         continue
-                    # Live fleet-sweep catch (this branch was dead code
-                    # until this same fix, so it had never been sweep-
-                    # tested before): discord-mcp's OWN test fixture,
-                    # `TEST_TOKEN = "fake-test-token-do-not-use"` --
-                    # obviously fake by its own literal text. Same
-                    # rationale as _is_real_secret_value_match: a real
-                    # secret essentially never spells out "fake"/"test"/
-                    # "dummy" as a substring of its own value.
-                    if _FAKE_VALUE_MARKERS.search(value):
-                        continue
                     for tgt in node.targets:
                         nm = _dotted(tgt)
-                        if not (nm and _SECRET_NAME.search(nm)):
+                        # Round-3 N-vote P1 (B2) fix: this used to call
+                        # raw _SECRET_NAME.search(nm), bypassing the
+                        # shared _name_looks_secret helper's word-boundary
+                        # guard AND its pagination-cursor-name exclusion
+                        # (OUR OWN curated name-shape judgment, same
+                        # "may fully exclude" category as the placeholder
+                        # list -- not a target-controlled signal). 14 of
+                        # awslabs/mcp's 209 revived-branch findings were
+                        # pagination-named assignments
+                        # (`expected_response.next_token = '...'`) that
+                        # should never have reached this branch at all.
+                        if not (nm and _name_looks_secret(nm)):
                             continue
                         has_suppress_comment = bool(_SUPPRESS_COMMENT.search(f.line_at(node.lineno)))
+                        confidence, tag_suffix = _compose_demotion([
+                            (has_suppress_comment, "author-suppressed"),
+                            (_has_fake_marker(value), "fake-marker"),
+                        ])
+                        detail = (
+                            f"'{nm}' is assigned a non-placeholder string literal; "
+                            "likely a committed credential."
+                        )
                         if has_suppress_comment:
-                            out.append(Finding(
-                                vuln_class="hardcoded-secret",
-                                title=f"Hardcoded secret assigned to '{nm}' (author-suppressed)",
-                                severity=Severity.P1, confidence=Confidence.LOW,
-                                file=f.rel, line=node.lineno,
-                                detail=(
-                                    f"'{nm}' is assigned a non-placeholder string literal; "
-                                    "likely a committed credential. The line carries an "
-                                    "author suppress-convention comment, which in "
-                                    "adversarial/third-party scanning cannot be trusted to "
-                                    "fully silence a finding -- confidence demoted instead."
-                                ),
-                                remediation="Verify this is genuinely a placeholder, not a "
-                                            "real credential; if real, rotate immediately.",
-                                snippet="<redacted secret assignment>",
-                            ))
-                            continue
+                            detail += (
+                                " The line carries an author suppress-convention "
+                                "comment, which in adversarial/third-party scanning "
+                                "cannot be trusted to fully silence a finding -- "
+                                "confidence demoted instead."
+                            )
+                        if _has_fake_marker(value):
+                            detail += (
+                                " The value also contains an explicit fake/dummy/"
+                                "test/placeholder/sample/demo marker -- likely, but "
+                                "not provably, a test fixture; confidence demoted "
+                                "rather than the finding dropped."
+                            )
                         out.append(Finding(
                             vuln_class="hardcoded-secret",
-                            title=f"Hardcoded secret assigned to '{nm}'",
-                            severity=Severity.P1, confidence=Confidence.MEDIUM,
+                            title=f"Hardcoded secret assigned to '{nm}'{tag_suffix}",
+                            severity=Severity.P1,
+                            confidence=(
+                                confidence if confidence == Confidence.LOW
+                                else Confidence.MEDIUM
+                            ),
                             file=f.rel, line=node.lineno,
-                            detail=f"'{nm}' is assigned a non-placeholder string "
-                                   "literal; likely a committed credential.",
+                            detail=detail,
                             remediation="Read from os.environ / a secret store; "
                                         "rotate and scrub if this was ever real.",
                             snippet="<redacted secret assignment>",

@@ -71,7 +71,7 @@ from ..tool_registry import (
 from .base import Detector, RepoContext, SourceFile
 from .secret_handling import (
     _SECRET_VALUE_PATTERNS, _JS_STRING_LITERAL, _name_looks_secret,
-    _is_real_secret_value_match,
+    _has_fake_marker, _compose_demotion,
 )
 
 _WHOLE_OBJECT_NAME = {"config", "settings", "cfg", "conf", "env", "environment", "secrets"}
@@ -402,10 +402,13 @@ class SecretLeakResponseDetector(Detector):
             if _name_looks_secret(key):
                 out.append(self._secret_name_finding_js(f, tool_label, lineno, key, via_key=True))
             for pat, what in _SECRET_VALUE_PATTERNS:
-                if pat.search(value) and _is_real_secret_value_match(what, value):
+                if pat.search(value):
+                    confidence, tag_suffix = _compose_demotion([
+                        (_has_fake_marker(value), "fake-marker"),
+                    ])
                     out.append(self._f(
-                        f"Hardcoded {what} returned from a tool response",
-                        Severity.P0, Confidence.HIGH, f, lineno,
+                        f"Hardcoded {what} returned from a tool response{tag_suffix}",
+                        Severity.P0, confidence, f, lineno,
                         f"Tool '{tool_label}' returns a literal that matches the "
                         f"shape of a {what}.",
                         "Never return a literal secret value; source it "
@@ -554,10 +557,13 @@ class SecretLeakResponseDetector(Detector):
                 out.append(self._secret_name_finding(f, label, ret, _dotted(leaf)))
             elif isinstance(leaf, ast.Constant) and isinstance(leaf.value, str):
                 for pat, what in _SECRET_VALUE_PATTERNS:
-                    if pat.search(leaf.value) and _is_real_secret_value_match(what, leaf.value):
+                    if pat.search(leaf.value):
+                        confidence, tag_suffix = _compose_demotion([
+                            (_has_fake_marker(leaf.value), "fake-marker"),
+                        ])
                         out.append(self._f(
-                            f"Hardcoded {what} returned from a tool response",
-                            Severity.P0, Confidence.HIGH, f, ret.lineno,
+                            f"Hardcoded {what} returned from a tool response{tag_suffix}",
+                            Severity.P0, confidence, f, ret.lineno,
                             f"{label} returns a literal that matches the shape "
                             f"of a {what}.",
                             "Never return a literal secret value; source it server-side "
@@ -573,10 +579,13 @@ class SecretLeakResponseDetector(Detector):
             if resolved and isinstance(leaf, ast.Name) and leaf.id in resolved:
                 value = resolved[leaf.id]
                 for pat, what in _SECRET_VALUE_PATTERNS:
-                    if pat.search(value) and _is_real_secret_value_match(what, value):
+                    if pat.search(value):
+                        confidence, tag_suffix = _compose_demotion([
+                            (_has_fake_marker(value), "fake-marker"),
+                        ])
                         out.append(self._f(
-                            f"Hardcoded {what} returned from a tool response (via resolved variable)",
-                            Severity.P0, Confidence.HIGH, f, ret.lineno,
+                            f"Hardcoded {what} returned from a tool response (via resolved variable){tag_suffix}",
+                            Severity.P0, confidence, f, ret.lineno,
                             f"{label} returns `{leaf.id}`, whose assigned literal value "
                             f"matches the shape of a {what} -- independent of the "
                             "variable's own name (which may be demoted, e.g. a "
