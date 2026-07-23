@@ -69,7 +69,10 @@ from ..tool_registry import (
     dispatch_segments,
 )
 from .base import Detector, RepoContext, SourceFile
-from .secret_handling import _SECRET_VALUE_PATTERNS, _JS_STRING_LITERAL, _name_looks_secret
+from .secret_handling import (
+    _SECRET_VALUE_PATTERNS, _JS_STRING_LITERAL, _name_looks_secret,
+    _is_real_secret_value_match,
+)
 
 _WHOLE_OBJECT_NAME = {"config", "settings", "cfg", "conf", "env", "environment", "secrets"}
 
@@ -198,6 +201,37 @@ def _stmts_direct_returns(stmts: list[ast.stmt]):
             yield from _direct_returns(stmt)
 
 
+def _resolve_simple_string_literals(node_or_stmts) -> dict[str, str]:
+    """name -> last-assigned string literal, for simple ``NAME = "literal"``
+    assignments found via ``ast.walk`` over ``node_or_stmts`` (a single
+    function/branch node, or a list of statements). Round-2 N-vote P1-5
+    fix: this is the value-shape backstop's variable-resolution half --
+    a pagination-named (or otherwise name-demoted) variable's OWN
+    assigned literal is checked against ``_SECRET_VALUE_PATTERNS``
+    independent of what its name looks like, so a real JWT/bearer-shaped
+    secret assigned to e.g. ``next_token`` still flags even though the
+    NAME-based check correctly demotes.
+
+    Deliberately bounded and best-effort: does not trace through string
+    concatenation via ``+``, f-strings, function calls, or reassignment
+    across branches -- a variable this can't resolve to a single literal
+    is simply absent from the map (never guessed, never over-claimed)."""
+    out: dict[str, str] = {}
+    targets = node_or_stmts if isinstance(node_or_stmts, list) else [node_or_stmts]
+    for root in targets:
+        for node in ast.walk(root):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            tgt = node.targets[0]
+            if (
+                isinstance(tgt, ast.Name)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                out[tgt.id] = node.value.value
+    return out
+
+
 def _file_function_index(f: SourceFile) -> dict[str, list[ast.AST]]:
     """name -> [FunctionDef/AsyncFunctionDef, ...] within this ONE file
     only. 2026-07-23 P0-2 N-vote fix: the previous cut built this repo-wide
@@ -258,10 +292,11 @@ class SecretLeakResponseDetector(Detector):
                     continue
                 if not any(_is_tool_decorator(d) for d in node.decorator_list):
                     continue
+                resolved = _resolve_simple_string_literals(node)
                 for ret in _direct_returns(node):
                     if ret.value is None:
                         continue
-                    findings.extend(self._check_return(f, f"Tool '{node.name}'", ret))
+                    findings.extend(self._check_return(f, f"Tool '{node.name}'", ret, resolved))
             if _file_imports_mcp(f):
                 findings.extend(self._scan_low_level_sdk(f))
         findings.extend(self._scan_js(ctx))
@@ -281,15 +316,17 @@ class SecretLeakResponseDetector(Detector):
         out: list[Finding] = []
         for tool_name, stmts, _shared in dispatch_segments(handler):
             label = f"Tool '{tool_name}'" if tool_name else handler_label
+            resolved = _resolve_simple_string_literals(stmts)
             for ret in _stmts_direct_returns(stmts):
                 if ret.value is None:
                     continue
-                out.extend(self._check_return(f, label, ret))
+                out.extend(self._check_return(f, label, ret, resolved))
             for cnode in _one_hop_dispatched_funcs(stmts, file_func_index, handler):
+                cnode_resolved = _resolve_simple_string_literals(cnode)
                 for ret in _direct_returns(cnode):
                     if ret.value is None:
                         continue
-                    out.extend(self._check_return(f, label, ret))
+                    out.extend(self._check_return(f, label, ret, cnode_resolved))
         return out
 
     # --- JS/TS: registration-window return regex (no AST available) ------
@@ -365,7 +402,7 @@ class SecretLeakResponseDetector(Detector):
             if _name_looks_secret(key):
                 out.append(self._secret_name_finding_js(f, tool_label, lineno, key, via_key=True))
             for pat, what in _SECRET_VALUE_PATTERNS:
-                if pat.search(value):
+                if pat.search(value) and _is_real_secret_value_match(what, value):
                     out.append(self._f(
                         f"Hardcoded {what} returned from a tool response",
                         Severity.P0, Confidence.HIGH, f, lineno,
@@ -443,12 +480,19 @@ class SecretLeakResponseDetector(Detector):
             "a boolean 'present/absent' or a fixed redaction mask instead.",
         )
 
-    def _check_return(self, f: SourceFile, label: str, ret: ast.Return) -> list[Finding]:
+    def _check_return(
+        self, f: SourceFile, label: str, ret: ast.Return,
+        resolved: dict[str, str] | None = None,
+    ) -> list[Finding]:
         """``label`` is a pre-formatted subject phrase for the finding
         message -- ``"Tool 'x'"`` for a decorator-registered tool or an
         unambiguous low-level-SDK dispatch branch, or a dispatch-handler
         description (e.g. ``"the 'call_tool' dispatch handler"``) when
-        attribution to one specific tool isn't possible (never guessed)."""
+        attribution to one specific tool isn't possible (never guessed).
+        ``resolved`` (round-2 N-vote P1-5 fix) is name -> assigned string
+        literal for simple same-scope assignments (see
+        ``_resolve_simple_string_literals``) -- a value-shape backstop for
+        a Name leaf whose NAME-based check is demoted."""
         out: list[Finding] = []
         expr = ret.value
         leaves = _leaf_values(expr)
@@ -510,7 +554,7 @@ class SecretLeakResponseDetector(Detector):
                 out.append(self._secret_name_finding(f, label, ret, _dotted(leaf)))
             elif isinstance(leaf, ast.Constant) and isinstance(leaf.value, str):
                 for pat, what in _SECRET_VALUE_PATTERNS:
-                    if pat.search(leaf.value):
+                    if pat.search(leaf.value) and _is_real_secret_value_match(what, leaf.value):
                         out.append(self._f(
                             f"Hardcoded {what} returned from a tool response",
                             Severity.P0, Confidence.HIGH, f, ret.lineno,
@@ -518,6 +562,28 @@ class SecretLeakResponseDetector(Detector):
                             f"of a {what}.",
                             "Never return a literal secret value; source it server-side "
                             "only, never echo it back through the protocol.",
+                        ))
+            # Round-2 N-vote P1-5 fix: value-shape backstop, UNCONDITIONAL
+            # (not elif-chained above) -- runs regardless of whether the
+            # NAME-based check above matched or was demoted (e.g. a
+            # pagination-cursor name). A variable whose resolved literal
+            # value matches a known secret shape (JWT, Bearer-prefixed,
+            # AKIA, ghp_, ...) still flags even when its NAME alone would
+            # never trip the heuristic.
+            if resolved and isinstance(leaf, ast.Name) and leaf.id in resolved:
+                value = resolved[leaf.id]
+                for pat, what in _SECRET_VALUE_PATTERNS:
+                    if pat.search(value) and _is_real_secret_value_match(what, value):
+                        out.append(self._f(
+                            f"Hardcoded {what} returned from a tool response (via resolved variable)",
+                            Severity.P0, Confidence.HIGH, f, ret.lineno,
+                            f"{label} returns `{leaf.id}`, whose assigned literal value "
+                            f"matches the shape of a {what} -- independent of the "
+                            "variable's own name (which may be demoted, e.g. a "
+                            "pagination-cursor-shaped name).",
+                            "Never return a literal secret value, however it's named; "
+                            "source it server-side only, never echo it back through "
+                            "the protocol.",
                         ))
 
         # dict keys that are themselves secret-named, regardless of the
