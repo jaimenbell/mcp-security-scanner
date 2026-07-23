@@ -17,3 +17,11 @@ docs/SAAS-TIER-SPEC.md
 
 # Internal GTM/outreach staging - never publish
 staged/
+
+# Ecosystem-scan v2 local artifacts + scratch + real target list.
+# These carry third-party repo names/paths and PRIVATE disclosure notes --
+# never tracked (the anonymized aggregate is promoted by operator decision,
+# not by git). The .example config (placeholders only) IS tracked.
+ecoscan-artifacts/
+ecoscan-scratch/
+ecoscan-targets.json
