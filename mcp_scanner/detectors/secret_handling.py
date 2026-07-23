@@ -53,6 +53,31 @@ _SECRET_VALUE_PATTERNS = [
 _FAKE_MARKER_WORDS = {"fake", "dummy", "placeholder", "sample", "demo", "test"}
 _XXXX_MARKER = re.compile(r"x{4,}", re.IGNORECASE)
 
+# --- Wave-4 round-2 fix (refuter-B): mock/fake-shaped assignment NAME -------
+# The corroborating CO-SIGNAL that pairs with a test-fixture path to license a
+# demotion of the (weaker, name-based, base-MEDIUM) AST-assignment branch --
+# `mock_credentials.token = "..."`, `fake_provider._password = "..."`, the
+# exact wave-4 noise shape. A mock-shaped name is itself target-controllable,
+# so it is NEVER a standalone demoter (see `_compose_demotion`): only the PAIR
+# (mock-name AND test-path) demotes, matching the cert-path precedent's
+# multi-signal bar. It is deliberately NOT wired into the value-shape branch --
+# a real `AKIA...`/`ghp_...` value is caught there at HIGH regardless of the
+# variable's name, so a name can never pull a value-shaped secret down.
+_MOCK_NAME_WORDS = frozenset({
+    "mock", "mocks", "fake", "fakes", "dummy", "stub", "stubs",
+    "placeholder", "sample", "demo", "test", "tests", "fixture",
+    "fixtures", "example", "examples",
+})
+
+
+def _name_has_mock_marker(name: str) -> bool:
+    """True when an identifier's word-tokens include an explicit mock/fake/
+    test/fixture/example marker (e.g. ``mock_credentials.token``,
+    ``fake_api_key``, ``test_secret``). Tokenized the same way ``_name_words``
+    tokenizes identifiers (underscores/hyphens/dots + camelCase). A CO-SIGNAL
+    only -- see ``_MOCK_NAME_WORDS`` and ``_compose_demotion``."""
+    return bool(set(_name_words(name)) & _MOCK_NAME_WORDS)
+
 
 def _has_fake_marker(value: str) -> bool:
     """True when ``value`` contains an explicit fake/dummy/placeholder/
@@ -76,17 +101,61 @@ def _has_fake_marker(value: str) -> bool:
     return bool(_XXXX_MARKER.search(value))
 
 
-def _compose_demotion(conditions: list[tuple[bool, str]]) -> tuple["Confidence", str]:
-    """``conditions``: [(is_true, tag_name), ...]. If ANY condition is
-    True, confidence demotes to LOW and every true tag is joined into a
-    single parenthesized title suffix (e.g. ``" (author-suppressed,
-    fake-marker)"``); multiple independent demotion signals compose,
-    they don't each get their own separate finding. Returns
-    (Confidence.HIGH, "") when nothing demotes."""
-    active = [tag for cond, tag in conditions if cond]
-    if not active:
+def _compose_demotion(
+    standalone: list[tuple[bool, str]],
+    is_test_path: bool = False,
+    path_cosignals: list[tuple[bool, str]] | None = None,
+) -> tuple["Confidence", str]:
+    """Confidence-demotion composer. Returns (Confidence.LOW, tag_suffix) if
+    the finding demotes, else (Confidence.HIGH, ""). Every true tag joins into
+    a single parenthesized title suffix (e.g. ``" (fake-marker, test-path)"``);
+    multiple signals compose into ONE finding, they never spawn separate ones.
+
+    ``standalone``: [(cond, tag), ...] -- signals each SUFFICIENT ALONE to
+    demote, on ANY path, because each is either an explicit author signal
+    (``author-suppressed``) or self-limiting (``fake-marker``: a value that
+    literally contains ``fake``/``xxxx``/``example`` etc. as a whole word
+    cannot simultaneously BE a working credential, so demoting on it can never
+    hide a real secret).
+
+    ``is_test_path`` / ``path_cosignals``: the wave-4 ROUND-2 safety rule
+    (refuter-B P1, 2026-07-23). A bare test-fixture PATH is TARGET-CONTROLLABLE
+    and discriminates NOTHING real on its own: ``fixtures/``, ``spec/``,
+    ``mocks/``, ``testserver/``, ``testdata/`` -- and even ``tests/`` -- are
+    all directories a genuine ``AKIA...``/``ghp_...``/``sk-...``/JWT/
+    private-key value can legitimately live in (Django/Rails ``fixtures/``
+    seed prod DBs; ``spec/`` holds OpenAPI/protobuf specs; ``mocks/`` ships as
+    a runtime MSW feature; Go ``testdata/`` VCR cassettes have contained REAL
+    recorded prod credentials). So the path NEVER demotes by itself. It demotes
+    ONLY when PAIRED with a corroborating co-signal in ``path_cosignals`` (e.g.
+    a mock/fake-shaped assignment NAME) -- TWO independent signals, the same
+    multi-signal bar the cert-path precedent set (self-signed AND test-path AND
+    CN/SAN marker). A co-signal on its own (a mock-named assignment in
+    NON-test source) does NOT demote either. When a finding is ALREADY demoted
+    by a ``standalone`` signal and ALSO sits on a test path, ``test-path`` is
+    appended as an accurate note only (it did not cause the demotion). This is
+    what keeps a real value-shaped secret at its base confidence in ANY
+    directory unless something beyond the bare path corroborates."""
+    tags = [tag for cond, tag in standalone if cond]
+    demoted = bool(tags)
+    cosignal_tags = [tag for cond, tag in (path_cosignals or []) if cond]
+
+    if is_test_path and cosignal_tags:
+        # path PAIRED with >=1 corroborating co-signal -> the pair demotes
+        demoted = True
+        for t in cosignal_tags:
+            if t not in tags:
+                tags.append(t)
+        if "test-path" not in tags:
+            tags.append("test-path")
+    elif is_test_path and demoted:
+        # already demoted by a standalone signal; path is an accurate note only
+        if "test-path" not in tags:
+            tags.append("test-path")
+
+    if not demoted:
         return Confidence.HIGH, ""
-    return Confidence.LOW, f" ({', '.join(active)})"
+    return Confidence.LOW, f" ({', '.join(tags)})"
 
 _SECRET_NAME = re.compile(
     r"(secret|token|password|passwd|api[_-]?key|private[_-]?key|client[_-]?secret)",
@@ -615,19 +684,27 @@ class SecretHandlingDetector(Detector):
 
     def _scan_literals(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
-        # --- Wave-4 FP fix: test-path confidence demotion -------------------
+        # --- Wave-4 FP fix: test-path confidence demotion (ROUND-2, refuter-B)
         # Reviving the AST-assignment branch (round-2 P2-6) surfaced a large
         # new noise class on test-heavy repos: mostly mock/test credential
-        # assignments in test files (`mock_credentials.token = "..."`). This
-        # is one MORE demotion signal, composed via `_compose_demotion` --
-        # NOT a special-case early return / suppression. A hardcoded-secret
-        # finding whose file is a test-fixture path demotes to LOW + a
-        # "(test-path)" tag; it is NEVER dropped. Critically, this demotes the
-        # CONFIDENCE only: the value-shape backstop (AKIA.../ghp_.../-----BEGIN
-        # PRIVATE KEY-----) below still FLAGS a real secret on a test path (LOW
-        # at worst) -- a genuine leaked credential does not vanish just because
-        # it lives under tests/. Same `_is_test_fixture_path` helper the cert
-        # path already uses; computed once per file.
+        # assignments in test files (`mock_credentials.token = "..."`).
+        #
+        # ROUND-2 SAFETY FIX: the first cut demoted on the bare test-fixture
+        # PATH alone -- refuter-B proved that dropped a genuine value-shaped
+        # secret (`AKIA...`/`ghp_...`/`sk-...`/JWT/private-key) to LOW purely
+        # because it sat under a TARGET-CONTROLLABLE segment (`fixtures/`,
+        # `spec/`, `mocks/`, `testserver/`, `testdata/` are all
+        # production-plausible; even `tests/` is not proof of fakeness). That
+        # is weaker than the cert-path precedent, which demotes only on
+        # MULTIPLE independent signals. Fixed: `test-path` is now a PAIR-ONLY
+        # signal in `_compose_demotion` -- it never demotes alone; it demotes
+        # only when paired with a corroborating co-signal, or merely tags a
+        # finding already demoted by a standalone signal (author-suppressed /
+        # fake-marker). Consequence: a real value-shaped secret with NO
+        # corroboration keeps its BASE confidence (HIGH here) in ANY directory,
+        # including test paths -- it still flags, it is just not demoted on
+        # path alone. Same `_is_test_fixture_path` helper the cert path uses;
+        # computed once per file.
         is_test_path = _is_test_fixture_path(f.rel)
         # value-shape matches on raw text (catches non-python too).
         #
@@ -654,19 +731,33 @@ class SecretHandlingDetector(Detector):
                     value = m.group(0)
                     if _is_known_placeholder_secret(value):
                         continue
-                    confidence, tag_suffix = _compose_demotion([
-                        (has_suppress_comment, "author-suppressed"),
-                        (_has_fake_marker(value), "fake-marker"),
-                        (is_test_path, "test-path"),
-                    ])
+                    # Value-shape branch: NO path co-signal is offered here on
+                    # purpose. A genuine value-shaped secret must never be
+                    # demoted on the bare path (refuter-B) -- so it demotes only
+                    # on a standalone signal (author-suppressed / fake-marker,
+                    # the latter self-limiting), and `test-path` can only tag a
+                    # finding those already demoted.
+                    confidence, tag_suffix = _compose_demotion(
+                        [
+                            (has_suppress_comment, "author-suppressed"),
+                            (_has_fake_marker(value), "fake-marker"),
+                        ],
+                        is_test_path=is_test_path,
+                    )
                     detail = f"A {what} appears as a literal in tracked source."
-                    if is_test_path:
+                    if "test-path" in tag_suffix:
                         detail += (
-                            " The file sits at a test-fixture path (tests/, "
-                            "fixtures/, ...) -- likely, but not provably, a mock/"
-                            "throwaway credential; confidence is demoted rather than "
-                            "the finding dropped. A real value-shaped secret still "
-                            "flags here, just at LOW confidence."
+                            " The file also sits at a test-fixture path -- noted "
+                            "as context on an ALREADY-demoted finding; the bare "
+                            "path did not cause the demotion."
+                        )
+                    elif is_test_path:
+                        detail += (
+                            " The file sits at a test-fixture path, but a bare "
+                            "test path is target-controllable and does NOT demote "
+                            "a value-shaped secret on its own -- this finding keeps "
+                            "its base confidence. (A real credential does not "
+                            "become fake by living under tests/.)"
                         )
                     if has_suppress_comment:
                         detail += (
@@ -727,22 +818,51 @@ class SecretHandlingDetector(Detector):
                         if not (nm and _name_looks_secret(nm)):
                             continue
                         has_suppress_comment = bool(_SUPPRESS_COMMENT.search(f.line_at(node.lineno)))
-                        confidence, tag_suffix = _compose_demotion([
-                            (has_suppress_comment, "author-suppressed"),
-                            (_has_fake_marker(value), "fake-marker"),
-                            (is_test_path, "test-path"),
-                        ])
+                        # AST-name branch (base MEDIUM, weaker than the
+                        # value-shape branch). Here test-path may pair with a
+                        # mock/fake-shaped assignment NAME -- TWO independent
+                        # signals -- to demote the wave-4 noise class
+                        # (`mock_credentials.token = "..."`). This is SAFE for
+                        # a real secret: if the assigned VALUE were value-shaped
+                        # (AKIA/ghp_/...), the value-shape branch above already
+                        # emitted a HIGH finding that a mock name cannot pull
+                        # down; this branch only demotes the weaker name-based
+                        # duplicate whose value is an arbitrary string. A mock
+                        # name alone (no test path) does NOT demote.
+                        name_mock = _name_has_mock_marker(nm)
+                        confidence, tag_suffix = _compose_demotion(
+                            [
+                                (has_suppress_comment, "author-suppressed"),
+                                (_has_fake_marker(value), "fake-marker"),
+                            ],
+                            is_test_path=is_test_path,
+                            path_cosignals=[(name_mock, "mock-name")],
+                        )
                         detail = (
                             f"'{nm}' is assigned a non-placeholder string literal; "
                             "likely a committed credential."
                         )
-                        if is_test_path:
+                        if "mock-name" in tag_suffix:
                             detail += (
-                                " The file sits at a test-fixture path (tests/, "
-                                "fixtures/, ...) -- this specific revived AST-assignment "
-                                "branch is a known noise source on test-heavy repos "
-                                "(mock/test credential assignments), so confidence is "
-                                "demoted rather than the finding dropped."
+                                " The assignment NAME is mock/fake/test-shaped AND "
+                                "the file sits at a test-fixture path -- two "
+                                "corroborating signals, so this weaker name-based "
+                                "finding is demoted (not dropped). A value-shaped "
+                                "secret would still flag independently at HIGH."
+                            )
+                        elif "test-path" in tag_suffix:
+                            detail += (
+                                " The file also sits at a test-fixture path -- noted "
+                                "as context on an ALREADY-demoted finding; the bare "
+                                "path did not cause the demotion."
+                            )
+                        elif is_test_path:
+                            detail += (
+                                " The file sits at a test-fixture path, but a bare "
+                                "test path is target-controllable and does NOT demote "
+                                "on its own without a corroborating co-signal (e.g. a "
+                                "mock-shaped name) -- this finding keeps its base "
+                                "confidence."
                             )
                         if has_suppress_comment:
                             detail += (
