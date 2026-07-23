@@ -1,0 +1,13 @@
+{
+  "target": "C:/scans/clean-mcp",
+  "files_scanned": 6,
+  "counts_by_severity": {"P0": 0, "P1": 0, "P2": 0, "P3": 0},
+  "clean_bill": true,
+  "findings": [],
+  "errors": [],
+  "scan_meta": {
+    "scanner_version": "88b133c",
+    "suite_counts": {"total": 346, "passed": 337, "skipped": 9},
+    "scan_date": "2026-07-23"
+  }
+}

@@ -1,0 +1,12 @@
+# Stale triage file: one valid id, one id that is not in the scan
+# (simulates a finding fixed between scans -- must render a loud warning,
+# never be silently dropped).
+[findings.2de1378d5d7a]
+verdict = "confirmed"
+note = "Still present in this scan."
+reviewed_by = "Jaimen"
+
+[findings.aaaabbbbcccc]
+verdict = "false-positive"
+note = "This finding was fixed in the previous engagement."
+reviewed_by = "Jaimen"

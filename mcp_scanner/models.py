@@ -158,6 +158,8 @@ class ScanResult:
     findings: list[Finding] = field(default_factory=list)
     files_scanned: int = 0
     errors: list[str] = field(default_factory=list)
+    # ISO date the scan ran (set by scan_repo); empty for hand-built results.
+    scan_date: str = ""
 
     def add(self, finding: Finding) -> None:
         self.findings.append(finding)
@@ -187,11 +189,33 @@ class ScanResult:
         return not any(f.severity in (Severity.P0, Severity.P1) for f in self.findings)
 
     def to_dict(self) -> dict:
+        # Assign each finding its stable finding_id (class+file+normalized
+        # title, line-independent -- see finding_identity.py) in emitted
+        # order, so collision suffixes are deterministic.
+        from .finding_identity import assign_finding_ids
+        from .scan_meta import scanner_version, suite_counts
+
+        ordered = self.sorted_findings
+        ids = assign_finding_ids([(f.vuln_class, f.file, f.title) for f in ordered])
+        finding_dicts = []
+        for fid, f in zip(ids, ordered):
+            d = f.to_dict()
+            d["finding_id"] = fid
+            finding_dicts.append(d)
         return {
             "target": self.target,
             "files_scanned": self.files_scanned,
             "counts_by_severity": self.counts_by_severity(),
             "clean_bill": self.clean_bill,
-            "findings": [f.to_dict() for f in self.sorted_findings],
+            "findings": finding_dicts,
             "errors": self.errors,
+            # Report-cover provenance (spec 2026-07-23): which scanner
+            # version produced this scan, its canonical suite counts, and
+            # the scan date -- read by the report generator, never invented
+            # at render time.
+            "scan_meta": {
+                "scanner_version": scanner_version(),
+                "suite_counts": suite_counts(),
+                "scan_date": self.scan_date,
+            },
         }
