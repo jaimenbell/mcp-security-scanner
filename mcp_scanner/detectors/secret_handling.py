@@ -96,6 +96,28 @@ def _looks_like_private_key_pem(path) -> bool:
     return "PRIVATE KEY-----" in text
 
 
+# --- Wave-1 FP fix (c): known-placeholder credentials + suppress comments -
+# Evidence (staged/ecosystem-scan-2026-07-23): awslabs/mcp's dynamodb-mcp-
+# server hardcodes AWS's own canonical example access-key/secret-key pair
+# (used throughout AWS's public docs to mean "put your real key here"),
+# already marked by the maintainer with the detect-secrets `# pragma:
+# allowlist secret` convention. Both mechanisms are curated/exact-match
+# only -- never fuzzy/substring -- so a real secret that merely resembles a
+# placeholder, or sits near an unrelated comment, still flags.
+_KNOWN_PLACEHOLDER_SECRETS = frozenset({
+    "AKIAIOSFODNN7EXAMPLE",                        # AWS docs' canonical example access-key id
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",     # AWS docs' canonical example secret-access-key
+})
+_SUPPRESS_COMMENT = re.compile(
+    r"#\s*pragma:\s*allowlist secret|//\s*pragma:\s*allowlist secret",
+    re.IGNORECASE,
+)
+
+
+def _is_known_placeholder_secret(value: str) -> bool:
+    return value in _KNOWN_PLACEHOLDER_SECRETS
+
+
 def _sibling_self_signed_cert(rel: str, root) -> bool:
     """Does the same directory as ``rel`` contain a sibling .pem/.crt/.cer
     file that is itself a provable self-signed cert? Used to extend
@@ -325,8 +347,13 @@ class SecretHandlingDetector(Detector):
         out: list[Finding] = []
         # value-shape matches on raw text (catches non-python too)
         for i, line in enumerate(f.lines, start=1):
+            if _SUPPRESS_COMMENT.search(line):
+                continue
             for pat, what in _SECRET_VALUE_PATTERNS:
-                if pat.search(line):
+                m = pat.search(line)
+                if m and _is_known_placeholder_secret(m.group(0)):
+                    continue
+                if m:
                     out.append(Finding(
                         vuln_class="hardcoded-secret",
                         title=f"Hardcoded {what} in source",
