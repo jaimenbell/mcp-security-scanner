@@ -19,8 +19,13 @@ from mcp_scanner.scanner import scan_repo
 
 CLEAN_SERVERS = [
     "github-mcp", "bus-mcp", "desktop-mcp", "rag-mcp", "discord-mcp",
-    "vllm-ops-mcp",  # added wave-1 (2026-07-23): scans clean live, was
-                     # already in cli.py's FLEET_SERVERS but missing here
+    "vllm-ops-mcp",  # added wave-1 (2026-07-23): clean bill (no P0/P1)
+                     # verified live, was already in cli.py's
+                     # FLEET_SERVERS but missing from this test's guard
+    "rails-mcp",     # added round-2 P3 (2026-07-23): same drift class as
+                      # vllm-ops-mcp above -- in FLEET_SERVERS since
+                      # 2026-07-19, clean bill (no P0/P1) verified live,
+                      # was missing from this test's guard by oversight
 ]
 
 
