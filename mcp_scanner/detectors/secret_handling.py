@@ -615,6 +615,20 @@ class SecretHandlingDetector(Detector):
 
     def _scan_literals(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
+        # --- Wave-4 FP fix: test-path confidence demotion -------------------
+        # Reviving the AST-assignment branch (round-2 P2-6) surfaced a large
+        # new noise class on test-heavy repos: mostly mock/test credential
+        # assignments in test files (`mock_credentials.token = "..."`). This
+        # is one MORE demotion signal, composed via `_compose_demotion` --
+        # NOT a special-case early return / suppression. A hardcoded-secret
+        # finding whose file is a test-fixture path demotes to LOW + a
+        # "(test-path)" tag; it is NEVER dropped. Critically, this demotes the
+        # CONFIDENCE only: the value-shape backstop (AKIA.../ghp_.../-----BEGIN
+        # PRIVATE KEY-----) below still FLAGS a real secret on a test path (LOW
+        # at worst) -- a genuine leaked credential does not vanish just because
+        # it lives under tests/. Same `_is_test_fixture_path` helper the cert
+        # path already uses; computed once per file.
+        is_test_path = _is_test_fixture_path(f.rel)
         # value-shape matches on raw text (catches non-python too).
         #
         # Round-2 N-vote P0-3 fix: this scanner's stated use case is
@@ -643,8 +657,17 @@ class SecretHandlingDetector(Detector):
                     confidence, tag_suffix = _compose_demotion([
                         (has_suppress_comment, "author-suppressed"),
                         (_has_fake_marker(value), "fake-marker"),
+                        (is_test_path, "test-path"),
                     ])
                     detail = f"A {what} appears as a literal in tracked source."
+                    if is_test_path:
+                        detail += (
+                            " The file sits at a test-fixture path (tests/, "
+                            "fixtures/, ...) -- likely, but not provably, a mock/"
+                            "throwaway credential; confidence is demoted rather than "
+                            "the finding dropped. A real value-shaped secret still "
+                            "flags here, just at LOW confidence."
+                        )
                     if has_suppress_comment:
                         detail += (
                             " The line carries an author suppress-convention comment "
@@ -707,11 +730,20 @@ class SecretHandlingDetector(Detector):
                         confidence, tag_suffix = _compose_demotion([
                             (has_suppress_comment, "author-suppressed"),
                             (_has_fake_marker(value), "fake-marker"),
+                            (is_test_path, "test-path"),
                         ])
                         detail = (
                             f"'{nm}' is assigned a non-placeholder string literal; "
                             "likely a committed credential."
                         )
+                        if is_test_path:
+                            detail += (
+                                " The file sits at a test-fixture path (tests/, "
+                                "fixtures/, ...) -- this specific revived AST-assignment "
+                                "branch is a known noise source on test-heavy repos "
+                                "(mock/test credential assignments), so confidence is "
+                                "demoted rather than the finding dropped."
+                            )
                         if has_suppress_comment:
                             detail += (
                                 " The line carries an author suppress-convention "
