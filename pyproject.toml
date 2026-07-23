@@ -13,10 +13,16 @@ authors = [{ name = "Jaime Bell" }]
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pyyaml>=6"]
-# Optional: enables precise self-signed-certificate detection for the
-# tracked-secret-file test-cert demotion (secret_handling.py). Never
-# required -- when absent, that demotion fails closed (stays flagged).
+# cryptography is in dev (not just `certs`) so CI actually exercises the
+# self-signed-cert demotion logic instead of skipping it silently -- a
+# clean "pip install .[dev]" venv with no crypto lib would otherwise
+# importorskip every cert-dependent test and CI would report green while
+# testing nothing about that code path (round-2 N-vote P0-1 fix).
+dev = ["pytest>=7", "pyyaml>=6", "cryptography>=41"]
+# Optional (runtime, non-dev installs): enables precise self-signed-
+# certificate detection for the tracked-secret-file test-cert demotion
+# (secret_handling.py). Never required -- when absent, that demotion
+# fails closed (stays flagged, never guessed).
 certs = ["cryptography>=41"]
 
 [project.scripts]

@@ -65,18 +65,202 @@ _JS_REGEX_VAR_LITERAL = re.compile(
 )
 
 
-def _js_regexp_var_names(text: str) -> set[str]:
-    """Variable names in this file assigned a RegExp value (`new
-    RegExp(...)` or a `/pattern/flags` literal) -- same-file only, never a
-    repo-wide guess. Used to tell `myRegex.exec(x)` (RegExp match) apart
-    from `child_process.exec(x)` (shell invocation) when a receiver-blind
-    exec-call regex alone can't."""
-    names: set[str] = set()
-    for m in _JS_REGEX_VAR_NEW.finditer(text):
-        names.add(m.group(1))
-    for m in _JS_REGEX_VAR_LITERAL.finditer(text):
-        names.add(m.group(1))
-    return names
+# --- Round-2 N-vote P0-2 fix: brace-scoped RegExp receiver resolution -----
+# (Superseded the wave-1 file-wide `_js_regexp_var_names` set two refuters
+# proved live: a RegExp var declared in one function silently demoted an
+# unrelated child_process.exec() sink of the same name in a completely
+# different function. Removed outright, not kept as a dead alias.)
+# A RegExp-var assignment is only a valid resolution for a `.exec(` call at
+# line L when L falls within that assignment's own innermost enclosing
+# {...} block (real JS block-scoping for const/let) -- or when the
+# assignment has NO enclosing block at all (module/top-level scope, which
+# real closures make visible from any nested function). This is a text-only
+# approximation of a real scope walk (no JS/TS AST in this scanner, see the
+# module docstring's honesty note), built the same way the rest of this
+# file's other JS heuristics are: bounded, same-file, over-flag-safe on
+# anything it can't resolve.
+_JS_CP_MODULE_BINDING = re.compile(
+    r"""\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\)"""
+    r"""|import\s+([A-Za-z_$][\w$]*)\s+from\s+['"](?:node:)?child_process['"]"""
+    r"""|import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+['"](?:node:)?child_process['"]"""
+)
+
+
+_JS_REGEX_CONTEXT_PRECEDING = set("([{,;:=!&|?+-*%^~<>")
+
+
+def _strip_js_noise(text: str) -> str:
+    """Blank out string/template-literal, comment, and regex-literal BODY
+    contents (same length, newlines preserved) so brace-counting for scope
+    extraction isn't confused by braces appearing inside any of them --
+    notably a Unicode property escape (``/\\p{Cf}/``) or a quantifier
+    (``/x{2,4}/``) inside a regex literal, both containing literal `{`/`}`
+    that corrupted scope extraction before this fix (round-2 N-vote P0-2,
+    live repro: ``const cfPattern = /\\p{Cf}/gu;`` produced a spurious
+    single-line "scope" from the regex body's own braces, breaking the
+    enclosing function's real span).
+
+    Regex-vs-division is genuinely ambiguous without a real parser; this
+    uses the same preceding-token heuristic real-world JS linters use: a
+    `/` opens a regex literal when the last significant (non-whitespace,
+    non-blanked) character before it is one of ``([{,;:=!&|?+-*%^~<>`` or
+    there is no such character yet (start of file/statement). An
+    ambiguous or unterminated `/` is left alone (treated as division) --
+    the safe direction: worse case is an unstripped regex body that could
+    still miscount a brace, no different from the pre-fix behavior for
+    that narrow shape, not a new risk."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    last_sig = ""
+    while i < n:
+        c = text[i]
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            j = i
+            while j < n and text[j] not in "\r\n":
+                j += 1
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append("".join(ch if ch in "\r\n" else " " for ch in text[i:j]))
+            i = j
+            last_sig = " "
+            continue
+        if c in ("'", '"', "`"):
+            quote = c
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            out.append("".join(ch if ch in "\r\n" else " " for ch in text[i:j]))
+            i = j
+            last_sig = '"'
+            continue
+        if c == "/" and (last_sig == "" or last_sig in _JS_REGEX_CONTEXT_PRECEDING):
+            j = i + 1
+            terminated = False
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] in "\r\n":
+                    break
+                if text[j] == "/":
+                    terminated = True
+                    j += 1
+                    break
+                j += 1
+            if terminated:
+                while j < n and text[j].isalpha():
+                    j += 1
+                seg = text[i:j]
+                out.append("".join(ch if ch in "\r\n" else " " for ch in seg))
+                i = j
+                last_sig = "/"
+                continue
+            # Unterminated on this line -- not actually a regex literal;
+            # fall through and treat this `/` as an ordinary character.
+        out.append(c)
+        if not c.isspace():
+            last_sig = c
+        i += 1
+    return "".join(out)
+
+
+def _js_block_spans_by_line(text: str) -> list[tuple[int, int]]:
+    """(start_line, end_line), 1-indexed inclusive, for every ``{...}``
+    block found via brace-depth matching over noise-stripped text (see
+    ``_strip_js_noise``). Nested blocks each get their own span; spans are
+    otherwise either disjoint or fully nested (a property of matched
+    braces), which is what makes the innermost-span lookup below correct."""
+    clean = _strip_js_noise(text)
+    stack: list[int] = []
+    spans: list[tuple[int, int]] = []
+    for idx, ch in enumerate(clean):
+        if ch == "{":
+            stack.append(idx)
+        elif ch == "}" and stack:
+            start = stack.pop()
+            spans.append((clean.count("\n", 0, start) + 1, clean.count("\n", 0, idx) + 1))
+    return spans
+
+
+def _innermost_span_containing(spans: list[tuple[int, int]], line: int) -> tuple[int, int] | None:
+    best: tuple[int, int] | None = None
+    for s, e in spans:
+        if s <= line <= e and (best is None or (e - s) < (best[1] - best[0])):
+            best = (s, e)
+    return best
+
+
+_JS_HUGE_LINE = 10**9  # sentinel "end of file" for a module-scope binding
+
+
+def _js_bindings_by_scope(text: str) -> list[tuple[str, str, int, int]]:
+    """[(name, kind, scope_start_line, scope_end_line)] for EVERY
+    RegExp-var assignment (kind="regexp") AND EVERY direct child_process
+    MODULE-object binding (kind="cp_module") in the file, each scoped to
+    its own innermost enclosing block (or module scope, (1, _JS_HUGE_LINE),
+    when declared at top level).
+
+    Both kinds share one scope-resolution pass so shadowing resolves
+    correctly: a name can legitimately be declared as BOTH a RegExp in one
+    function AND a child_process reference in a different function (or at
+    module scope) -- ``_resolve_receiver_kind`` below picks whichever
+    declaration's scope is the SMALLEST (innermost/most specific) one that
+    contains the usage line, exactly like real JS block-scoping resolves a
+    shadowed identifier. Computing this jointly (not as two independent
+    "is this name ever a regexp" / "is this name ever a cp module" sets) is
+    what stops a local RegExp shadow in one function from leaking into an
+    unrelated function's real child_process usage of the same name, and
+    the reverse."""
+    spans = _js_block_spans_by_line(text)
+    out: list[tuple[str, str, int, int]] = []
+    for pat, kind in (
+        (_JS_REGEX_VAR_NEW, "regexp"),
+        (_JS_REGEX_VAR_LITERAL, "regexp"),
+        (_JS_CP_MODULE_BINDING, "cp_module"),
+    ):
+        for m in pat.finditer(text):
+            name = next((g for g in m.groups() if g), None)
+            if not name:
+                continue
+            decl_line = text.count("\n", 0, m.start()) + 1
+            enclosing = _innermost_span_containing(spans, decl_line)
+            if enclosing is None:
+                out.append((name, kind, 1, _JS_HUGE_LINE))
+            else:
+                out.append((name, kind, enclosing[0], enclosing[1]))
+    return out
+
+
+def _resolve_receiver_kind(
+    bindings: list[tuple[str, str, int, int]], name: str, lineno: int
+) -> str | None:
+    """Among every recorded binding of ``name`` whose scope contains
+    ``lineno``, return the kind of the SMALLEST (innermost/most specific)
+    one -- the real-JS-shadowing-correct resolution -- or ``None`` if no
+    binding of this name is visible at this line at all (unresolved).
+    Ties (same scope size, contradictory kinds -- not valid real JS, but
+    defensive) resolve to "cp_module" (the safe, still-flagged direction)."""
+    best_size: int | None = None
+    best_kind: str | None = None
+    for bname, kind, start, end in bindings:
+        if bname != name or not (start <= lineno <= end):
+            continue
+        size = end - start
+        if best_size is None or size < best_size:
+            best_size, best_kind = size, kind
+        elif size == best_size and kind == "cp_module":
+            best_kind = "cp_module"
+    return best_kind
 
 # --- P1d: destructure-aliased child_process bindings ---------------------
 # `const { exec: run } = require('child_process')` (require form) or
@@ -190,7 +374,7 @@ class ParamInjectionDetector(Detector):
         has_child_process = bool(_JS_CHILD_PROCESS_IMPORT.search(text))
         exec_aliases, spawn_aliases = _js_child_process_aliases(text)
         has_child_process = has_child_process or bool(exec_aliases) or bool(spawn_aliases)
-        regexp_vars = _js_regexp_var_names(text)
+        bindings = _js_bindings_by_scope(text)
         has_containment = any(h in text for h in _CONTAINMENT_HINTS)
         has_allowlist = any(h in text for h in _ALLOWLIST_HINTS)
 
@@ -200,7 +384,7 @@ class ParamInjectionDetector(Detector):
             line = js_util.code_part(raw_line)
 
             if has_child_process:
-                if self._js_is_real_exec_call(line, exec_aliases, regexp_vars):
+                if self._js_is_real_exec_call(line, i, exec_aliases, bindings):
                     out.append(self._f(
                         "shell-injection", "child_process.exec(Sync) invocation",
                         Severity.P1, Confidence.HIGH, f, i,
@@ -289,27 +473,36 @@ class ParamInjectionDetector(Detector):
         return out
 
     @staticmethod
-    def _js_is_real_exec_call(line: str, exec_aliases: set[str], regexp_vars: set[str]) -> bool:
+    def _js_is_real_exec_call(
+        line: str,
+        lineno: int,
+        exec_aliases: set[str],
+        bindings: list[tuple[str, str, int, int]],
+    ) -> bool:
         """True when this line's exec(Sync)?( call is a real
         child_process invocation, not a RegExp.prototype.exec() match call
-        wearing the same syntax. Receiver resolution, same-file-bounded:
+        wearing the same syntax. Receiver resolution, same-file-bounded
+        AND scope-aware (round-2 N-vote P0-2 fix -- real-JS-shadowing-
+        correct, see ``_resolve_receiver_kind``):
 
-        - a captured receiver identifier (``NAME.exec(``): flagged unless
-          ``NAME`` resolves to a same-file RegExp variable (and isn't
-          literally ``child_process``, which always stays a real sink);
+        - a captured receiver identifier (``NAME.exec(``): resolve
+          ``NAME``'s kind at THIS line via ``_resolve_receiver_kind``.
+          ``"regexp"`` -> demoted. ``"cp_module"`` or literally
+          ``child_process`` -> real sink, flagged. Unresolved (no binding
+          of this name visible at this line at all) -- stays flagged, the
+          over-flag-safe direction;
         - no receiver at all but an inline regex literal immediately
           precedes ``.exec(``: demoted;
         - a genuinely bare call (``exec(cmd)``) or a destructured-alias
-          call: real sink, flagged (unchanged from before this fix);
-        - anything else with a receiver that ISN'T a resolved RegExp var:
-          unresolved -- stays flagged, the over-flag-safe direction.
+          call: real sink, flagged (unchanged from before this fix).
         """
         rec_m = _JS_EXEC_RECEIVER.search(line)
         if rec_m:
             receiver = rec_m.group(1)
             if receiver == "child_process":
                 return True
-            return receiver not in regexp_vars
+            kind = _resolve_receiver_kind(bindings, receiver, lineno)
+            return kind != "regexp"
         if _JS_REGEX_LITERAL_EXEC.search(line):
             return False
         if _JS_BARE_EXEC.search(line) or _js_alias_call(line, exec_aliases):
