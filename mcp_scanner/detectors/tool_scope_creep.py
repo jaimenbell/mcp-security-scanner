@@ -21,12 +21,26 @@ This detector:
    opt-in / permission check on the tool function itself, and no gate found
    on the (one-hop) helper it delegates to.
 
-Honesty note: gate resolution is a same-file-or-one-hop, name-based heuristic
+Honesty note: gate resolution is a same-file, one-hop, name-based heuristic
 — not a real call graph. It matches this repo's existing "same-file heuristic
 only" disclosure (cross-file taint tracking is explicitly out of scope), with
 one deliberate, narrow extension (a single hop through a directly-called
-helper function) because that thin-wrapper-delegates-to-a-gated-helper shape
-is the dominant real pattern this hazard needs to not false-positive on.
+helper function in THE SAME FILE) because that thin-wrapper-delegates-to-a-
+gated-helper shape is the dominant real pattern this hazard needs to not
+false-positive on. Honest cost of same-file-only: a tool that delegates to a
+helper imported from another module gets that hop dropped entirely — gate
+not visible, so the tool flags as ungated. That is the over-flag direction
+this detector already accepts everywhere else, not a new exposure.
+
+Same-file scoping closed 2026-07-23 (N-vote refuter live repro): this
+detector's ``func_index``/``gated_names`` used to be built REPO-WIDE by bare
+short function name in ``run()`` — an unrelated, never-imported, same-named
+gated helper anywhere else in the repo could silence a genuinely ungated
+mutating tool's own one-hop helper (a false NEGATIVE, the worse direction for
+this detector's primary target class). Both the decorator-registered path
+(``run()``) and the low-level SDK dispatch path now build this index
+same-file-only via the shared ``_build_function_index_for_file`` — see that
+method's docstring for the full history.
 
 Low-level MCP SDK coverage (2026-07-23): this detector used to consume only
 ``extract_tool_registry``'s ``source == "js-regex"`` entries and re-derive
@@ -223,13 +237,28 @@ class ToolScopeCreepDetector(Detector):
 
     def run(self, ctx: RepoContext) -> list[Finding]:
         findings: list[Finding] = []
-        func_index = self._build_function_index(ctx)
-        gated_names = self._build_gate_index(func_index)
 
         for f in ctx.files:
             if f.tree is None:
                 continue
             module_gate = _module_level_env_gate(f)
+            # 2026-07-23 (closing the README's named follow-up): the
+            # func_index/gated_names used for this decorator path's one-hop
+            # helper-delegation gate resolution are now built SAME-FILE-ONLY,
+            # matching the low-level path's own _build_function_index_for_file
+            # convention shipped earlier the same day. Before this fix these
+            # were built repo-wide by bare short function name -- an N-vote
+            # refuter proved live that an unrelated, never-imported, same-named
+            # gated helper elsewhere in the repo could silence a genuinely
+            # ungated decorator-registered mutating tool (a false NEGATIVE on
+            # this detector's primary target class, the worse direction than a
+            # false positive). Honest cost of same-file-only: a tool that
+            # delegates to a helper imported from ANOTHER module now gets that
+            # hop dropped -- gate not visible -> tool flags as ungated. That is
+            # the over-flag direction this detector's own docs already accept
+            # ("over-flag-rather-than-miss"), not a new exposure.
+            func_index = self._build_function_index_for_file(f)
+            gated_names = self._build_gate_index(func_index)
             for node in ast.walk(f.tree):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
@@ -290,8 +319,8 @@ class ToolScopeCreepDetector(Detector):
             return []
         handler = handlers[0]
         # Same-file-only (see _build_function_index_for_file docstring) --
-        # distinct from, and does not affect, the decorator path's own
-        # repo-wide func_index/gated_names built in run().
+        # this handler gets its own fresh index built from ITS file, same
+        # convention the decorator path in run() now uses for its file too.
         file_func_index = self._build_function_index_for_file(f)
         file_gated_names = self._build_gate_index(file_func_index)
         module_gate = _module_level_env_gate(f)
@@ -479,28 +508,27 @@ class ToolScopeCreepDetector(Detector):
                     indirect_gate = True
         return sink_hit, indirect_gate
 
-    def _build_function_index(self, ctx: RepoContext) -> dict:
-        idx: dict[str, list[tuple[SourceFile, ast.AST]]] = {}
-        for f in ctx.files:
-            if f.tree is None:
-                continue
-            for node in ast.walk(f.tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    idx.setdefault(node.name, []).append((f, node))
-        return idx
-
     def _build_function_index_for_file(self, f: SourceFile) -> dict:
-        """Same shape as ``_build_function_index``, scoped to ONE file.
-        2026-07-23 (self-caught during the P0-2 N-vote fix pass): the
-        low-level SDK path's one-hop helper/gate resolution shares this
-        detector's pre-existing repo-wide-by-short-name ``func_index``/
-        ``gated_names`` mechanism -- the same class of bug the N-vote
-        refuter proved against the (separate, out-of-scope) decorator path.
-        Since the low-level path is new code from this same session, it is
-        scoped same-file-only here rather than shipped with a known-live
-        cross-file collision risk. Does NOT change the pre-existing
-        decorator-registered path's own repo-wide behavior (see this
-        detector's docstring for that named follow-up)."""
+        """name -> [(SourceFile, FunctionDef/AsyncFunctionDef), ...] within
+        this ONE file only. Shared by both the decorator-registered path
+        (``run()``) and the low-level SDK dispatch path (``_scan_low_level_sdk``)
+        for their one-hop helper-delegation gate resolution.
+
+        2026-07-23 history: first added same-file-only for the low-level SDK
+        path only (self-caught during the P0-2 N-vote fix pass), while the
+        pre-existing decorator-registered path still built its own index
+        REPO-WIDE by bare short function name -- an N-vote refuter then
+        proved live that an unrelated, never-imported, same-named gated
+        helper elsewhere in the repo could silence a genuinely ungated
+        decorator-registered mutating tool (false NEGATIVE, worse direction
+        than a false positive). The decorator path was moved onto this same
+        same-file-only index the same day, closing that gap; the old
+        repo-wide ``_build_function_index`` is retired. Same-file-only
+        matches the same-file-only ``Tool()``<->dispatcher correlation
+        precedent already shipped for reachability: a helper in another file
+        that isn't provably reachable this way is an honest miss (the tool
+        then flags as ungated -- the over-flag direction this detector's own
+        docs already accept), disclosed, never a guessed hit."""
         idx: dict[str, list[tuple[SourceFile, ast.AST]]] = {}
         if f.tree is None:
             return idx
