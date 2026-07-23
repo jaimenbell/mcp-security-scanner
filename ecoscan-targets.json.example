@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to ecoscan-targets.json (gitignored) and fill in real targets. name = an anonymization/display key you choose (used ONLY in gitignored local artifacts, never a tracked file). location = a local filesystem path OR a git URL (auto-detected). Local paths are scanned in place (no clone, no network); URLs are shallow-cloned read-only into ecoscan-scratch/. Never put real third-party repo names/URLs in this .example file -- keep those in the gitignored ecoscan-targets.json only.",
+  "targets": [
+    { "name": "local-fixture-a", "location": "./tests/fixtures/vuln_codegen" },
+    { "name": "local-fixture-b", "location": "./tests/fixtures/clean_auth" }
+  ]
+}

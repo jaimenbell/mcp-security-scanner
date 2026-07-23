@@ -78,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "report":
         from .report_generator import report_main
         return report_main(argv[1:])
+    # `mcp-scan ecosystem-scan ...` -- batch-scan a list of MCP-server repos,
+    # staging an anonymized aggregate + PRIVATE disclosure notes to a
+    # gitignored local dir. Presentation/orchestration only.
+    if argv and argv[0] == "ecosystem-scan":
+        from .ecosystem_scan import ecosystem_main
+        return ecosystem_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="mcp-scan",
         description="Static security scanner for MCP servers.",
