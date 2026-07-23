@@ -53,15 +53,46 @@ class Reachability(str, Enum):
     AST call-graph plus best-effort cross-file import following. It never
     drops a finding — it only *labels* it and nudges confidence up or down, in
     keeping with the scanner's deliberate over-flag philosophy.
+
+    CLI_ONLY and UNCALLED (added 2026-07-22, dogfood finding on rag-mcp's
+    ``lock.py:144``) refine what used to be lumped into UNREACHABLE for the
+    decidable Python-AST case: a finding not reachable from any tool root
+    either (a) has a real, statically-found caller elsewhere in the repo —
+    CLI_ONLY, since that caller is by construction NOT tool-descended (the
+    forward tool walk already failed to reach it) and is typically an argv/
+    CLI-main entrypoint or a test file — or (b) has no caller anywhere —
+    UNCALLED, genuinely dead code. Both grades are withheld (falling back to
+    UNKNOWN) whenever the repo contains any statically-unresolvable call site
+    (getattr/locals/globals-style dynamic dispatch) that could plausibly
+    reach the finding by a path this scanner cannot see — soundness over
+    decidability. UNREACHABLE is kept in the enum for schema stability (JSON
+    consumers, the client-report label table) but is no longer emitted by the
+    Python-AST decidable branch — CLI_ONLY/UNCALLED/UNKNOWN now cover it.
     """
 
     REACHABLE = "reachable"                # inside a registered tool handler,
                                            # or a function transitively called
                                            # from one
-    UNREACHABLE = "unreachable-by-tools"   # no call path from any registered
-                                           # tool reaches this code
+    CLI_ONLY = "cli-only"                  # has a real caller, but every found
+                                           # caller traces to a non-tool
+                                           # entrypoint (argv/CLI-main, a test
+                                           # file, an admin script) — never a
+                                           # registered MCP tool
+    UNCALLED = "uncalled"                  # no caller found anywhere in the
+                                           # repo (dead code) — stronger than
+                                           # UNKNOWN, only asserted when no
+                                           # dynamic-dispatch escape hatch
+                                           # exists that could hide a caller
+    UNREACHABLE = "unreachable-by-tools"   # legacy/reserved: no call path
+                                           # from any registered tool reaches
+                                           # this code. No longer emitted by
+                                           # the current grading logic (see
+                                           # CLI_ONLY/UNCALLED above); kept
+                                           # for schema/JSON-consumer stability
     UNKNOWN = "unknown"                    # parse/scope limits, no tools
-                                           # registered, or non-Python surface
+                                           # registered, non-Python surface,
+                                           # or dynamic dispatch present that
+                                           # makes CLI_ONLY/UNCALLED unsound
 
 
 class Taint(str, Enum):
@@ -101,6 +132,11 @@ class Finding:
     # Set by the post-detector reachability pass; UNKNOWN until then, so every
     # existing detector constructor stays valid without change.
     reachability: Reachability = Reachability.UNKNOWN
+    # Caller-chain evidence for CLI_ONLY/UNCALLED grades (e.g.
+    # "called from _cmd_ingest (cli.py:29); no further caller found -- likely
+    # an argv/CLI entrypoint"). Empty for every other grade/every existing
+    # constructor, so no change is required at any other call site.
+    reachability_evidence: str = ""
     # Set by the post-detector taint pass; UNKNOWN until then (and for every
     # non-dataflow-shaped finding), so every existing constructor stays valid.
     taint: Taint = Taint.UNKNOWN

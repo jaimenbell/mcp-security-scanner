@@ -66,6 +66,8 @@ def render_markdown(result: ScanResult) -> str:
             lines.append(f"- **What:** {f.detail}")
             if f.snippet:
                 lines.append(f"- **Where:** `{f.snippet}`")
+            if f.reachability_evidence:
+                lines.append(f"- **Reachability evidence:** {f.reachability_evidence}")
             lines.append(f"- **Fix:** {f.remediation}")
             lines.append("")
 

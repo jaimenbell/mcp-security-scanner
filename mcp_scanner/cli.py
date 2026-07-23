@@ -16,7 +16,7 @@ from pathlib import Path
 from .scanner import scan_repo
 from .reporting import render_markdown, render_json, render_summary_line
 from .client_report import render_client_report
-from .models import ScanResult
+from .models import ScanResult, Reachability
 
 # The operator's real MCP servers. mcp-factory is the known-vulnerable target
 # (codegen-injection class); the other five were audited clean.
@@ -81,6 +81,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="scan the fleet's own MCP servers (dogfood proof)")
     parser.add_argument("--fail-on", choices=["P0", "P1", "P2", "P3"], default=None,
                         help="exit non-zero if any finding at/above this severity")
+    parser.add_argument("--include-cli-only-in-gate", action="store_true",
+                        help="count reachability:cli-only findings toward "
+                             "--fail-on (default: excluded). A cli-only "
+                             "finding's only known caller is a non-tool "
+                             "entrypoint (argv/CLI-main, an admin script, a "
+                             "test file) -- never a registered MCP tool -- "
+                             "so it does not block a build gate by default. "
+                             "Pass this flag if your CLI/admin surface is "
+                             "itself part of the attacker-reachable scope "
+                             "you want gated (e.g. a publicly-exposed "
+                             "management CLI).")
     args = parser.parse_args(argv)
 
     if args.self_audit:
@@ -101,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             clean = [r for r in results if r.clean_bill]
             print(f"{len(flagged)} server(s) with P0/P1 findings, "
                   f"{len(clean)} clean bill.")
-        return _exit_code(results, args.fail_on)
+        return _exit_code(results, args.fail_on, args.include_cli_only_in_gate)
 
     if not args.path:
         parser.error("provide a path to scan, or use --self-audit")
@@ -113,17 +124,24 @@ def main(argv: list[str] | None = None) -> int:
         print(render_client_report(result, client_name=args.client_name))
     else:
         print(render_markdown(result))
-    return _exit_code([result], args.fail_on)
+    return _exit_code([result], args.fail_on, args.include_cli_only_in_gate)
 
 
-def _exit_code(results: list[ScanResult], fail_on: str | None) -> int:
+def _exit_code(results: list[ScanResult], fail_on: str | None,
+               include_cli_only: bool = False) -> int:
     if not fail_on:
         return 0
     rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}[fail_on]
     for r in results:
         for f in r.findings:
-            if f.severity.rank <= rank:
-                return 2
+            if f.severity.rank > rank:
+                continue
+            # cli-only's only known caller is a non-tool entrypoint (argv/
+            # CLI-main, an admin script, a test file) -- excluded from the
+            # gate by default; --include-cli-only-in-gate opts back in.
+            if f.reachability is Reachability.CLI_ONLY and not include_cli_only:
+                continue
+            return 2
     return 0
 
 
