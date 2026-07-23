@@ -4,6 +4,10 @@
     mcp-scan <path> --json          emit JSON instead
     mcp-scan --self-audit           scan the operator's 6 fleet MCP servers
                                     (the dogfood trust-signal proof)
+    mcp-scan report <scan.json>     render the client-grade report from an
+                                    existing scan JSON (+ optional
+                                    --annotations triage.toml); see
+                                    report_generator.py
 """
 
 from __future__ import annotations
@@ -66,6 +70,14 @@ def run_self_audit(as_json: bool = False) -> list[ScanResult]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    # `mcp-scan report <scan.json> ...` -- the client-grade deliverable,
+    # rendered from an EXISTING scan JSON (never re-runs the scan).
+    # Dispatched before the flat parser so the pre-existing
+    # `mcp-scan <path>` surface stays byte-for-byte unchanged.
+    if argv and argv[0] == "report":
+        from .report_generator import report_main
+        return report_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="mcp-scan",
         description="Static security scanner for MCP servers.",
