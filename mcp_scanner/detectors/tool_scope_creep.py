@@ -106,6 +106,91 @@ gate, or a shared pre-dispatch permission check that runs before every
 branch) is treated as gating every branch in that handler — a deliberately
 coarse, disclosed heuristic (same breadth already accepted for the existing
 module-level gate), not per-branch dataflow proof.
+
+Round 3 -- sink-substring-fix lane (2026-07-23, sink-classification fix +
+severity calibration): ``_is_mutating_sink_call`` used a bare SUBSTRING test
+-- ``if "subprocess" in name`` -- against the call's own dotted/bare name.
+A HELPER FUNCTION whose name merely contains the word "subprocess" (e.g.
+``_run_subprocess``) matched that test even when its body never touches the
+real ``subprocess`` module at all -- reproduced live against vllm-ops-mcp:
+``get_gpu_status``/``get_service_status``/``get_serve_config`` each
+delegate, via ``from . import probes`` + ``probes.get_gpu_status()`` (the
+one-hop-resolved call), to ``probes.py``'s same-named function, whose OWN
+body then calls a helper literally named ``_run_subprocess`` -- producing 3
+false P1/HIGH findings. The ``_MUTATING_SINK_SHORT`` fallback (HTTP verbs,
+subprocess/os short names) had the identical bug one level down:
+exact-equality on the call's bare short name with no requirement that the
+call even be an attribute access -- a bare call to a user-defined function
+literally named ``run`` or ``post`` matched it too.
+
+Fixed by replacing both with structural, dotted-name matching
+(``_SINK_DOTTED_EXACT`` for exact ``module.attr`` pairs; the short-name
+fallback now requires an actual "." in the resolved name, i.e. a real
+attribute access on SOME receiver, never a bare ``Name`` call) -- see
+``_is_mutating_sink_call``'s docstring. This closes the false-positive class
+categorically: a user-defined function whose NAME contains or equals a sink
+word is never, by itself, a sink.
+
+Verified live fleet outcome (not the outcome originally hypothesized --
+stated precisely because the difference matters): vllm-ops-mcp's REAL call
+chain is ``get_gpu_status_tool`` -(one resolved hop, import-aware)->
+``probes.get_gpu_status`` -(a SECOND hop)-> ``_run_subprocess`` -(a THIRD
+call)-> ``subprocess.run(...)``. This detector's one-hop resolver (round 2,
+explicitly documented as "BOUNDED... not a real call graph or transitive
+dataflow proof") only inspects the FIRST resolved hop's own body for a sink
+-- it does not recursively resolve a second hop. Before this fix, the
+substring bug was accidentally providing false "reach": scanning
+``probes.get_gpu_status``'s body found the bare call ``_run_subprocess(...)``
+and misclassified it AS the sink via name substring, without ever needing to
+look inside ``_run_subprocess`` itself. After the fix, that bare call is
+correctly seen as "just a name" -- and the real ``subprocess.run`` one hop
+further in is out of this resolver's bound. The honest result, confirmed via
+a live before/after fleet sweep (see the sink-substring-fix lane report),
+is that all 3 vllm-ops-mcp findings go to ZERO -- not because of any
+suppression logic added by this fix, but as an exposed side effect of an
+ALREADY-EXISTING, already-disclosed one-hop-only limitation that the
+substring bug had been accidentally papering over. This is the same class of
+disclosed residual as the unresolvable-external-hop case above (a real,
+stated miss, never a guess in either direction) -- extending the resolver to
+follow a second hop is explicitly out of scope for this lane (a
+structural/architectural change to ``_resolve_call_targets``, not a sink-
+classification fix; round 1/round 2 above show that even ONE hop took two
+N-vote passes to get right, so a deeper resolver is its own follow-up lane,
+not attempted here).
+
+Independent of that fleet-specific outcome, this fix ALSO introduces a
+severity/confidence CALIBRATION for the general one-hop-reachable case
+(e.g. a tool that calls a `subprocess`-wrapping helper directly, same file
+or via an explicit import, with no second hop needed) -- this axis is real
+and pinned by its own tests, it simply doesn't fire on vllm-ops-mcp's
+specific two-hop shape. ``subprocess.run``/``Popen``/``call``/
+``check_output``/``check_call`` accept a literal argv LIST with no shell
+metacharacter interpretation unless ``shell=True`` is explicitly passed (the
+well-known, AST-visible signature of real shell-injection risk -- a string
+command interpreted by ``/bin/sh``). A one-hop-resolved subprocess call
+without ``shell=True`` -- a fixed argv list executed directly -- is
+calibrated to P2/MEDIUM rather than P1/HIGH via ``_is_high_risk_sink_call``;
+``os.system``/``os.popen`` stay unconditionally high-risk (always
+shell-interpreted by construction, no argv-list form exists), as do
+``os.remove``/``unlink``/``rmdir``/``shutil.rmtree``/``move``, the HTTP
+verbs, sendmail, and open-for-write. A direct (same-body) or one-hop
+``shell=True`` sink is unchanged at P1/HIGH (see ``vuln_tool_scope``'s
+``run_shell`` and ``vuln_tool_scope_cross_file_sink_import``'s
+``sync_repo``, both pinned). See
+``tests/test_tool_scope_creep_sink_substring_fix.py`` for all pinned cases
+(benign-named helper stays quiet; a genuinely one-hop-reachable subprocess
+call without ``shell=True`` calibrates to P2; direct/cross-file
+``shell=True`` sinks are unchanged at P1/HIGH).
+
+Disclosed, out-of-scope follow-ups: (1) extending the one-hop resolver to a
+bounded second hop (would restore a P2-level finding for vllm-ops-mcp's real
+shape) -- a separate, larger initiative, not attempted here; (2) the JS/TS
+line-window path (``_JS_MUTATING_SINK``) has an analogous ``shell:
+true``-vs-argv-array distinction for ``child_process.spawn``/``execFile`` it
+does not yet make (``exec``/``execSync`` ARE always shell-interpreted, same
+as ``os.system``, so those two stay correctly high-risk as-is) -- not
+attempted here, scoped out per this lane's HARD RAILS
+(``_is_mutating_sink_call`` + its direct tests/docs only).
 """
 
 from __future__ import annotations
@@ -144,6 +229,26 @@ _MUTATING_SINK_SHORT = {
     "remove", "unlink", "rmdir", "rmtree", "move",           # filesystem delete/move
     "post", "put", "delete", "patch",                        # HTTP-mutate verbs
     "sendmail", "send_mail",                                 # messaging
+}
+
+# Exact `module.attr` dotted-path sink matches (round 3, 2026-07-23 -- see
+# `_is_mutating_sink_call`'s docstring for why this replaced a substring
+# test). `_dotted` only ever produces a "." when the call is an attribute
+# access, so exact membership here can never match a bare Name call.
+_SINK_DOTTED_EXACT = {
+    "subprocess.run", "subprocess.Popen", "subprocess.call",
+    "subprocess.check_output", "subprocess.check_call", "subprocess.popen",
+    "os.system", "os.popen", "os.remove", "os.unlink", "os.rmdir",
+    "shutil.rmtree", "shutil.move",
+}
+
+# subprocess.* calls needing the shell=True check for HIGH-risk calibration
+# (round 3) -- os.system/os.popen are excluded because they are ALWAYS
+# shell-interpreted by construction (no argv-list form exists), so they stay
+# unconditionally high-risk.
+_SUBPROCESS_RUN_LIKE = {
+    "subprocess.run", "subprocess.Popen", "subprocess.call",
+    "subprocess.check_output", "subprocess.check_call",
 }
 
 # --- gate hints -----------------------------------------------------------
@@ -187,15 +292,38 @@ def _unparse(node: ast.AST) -> str:
 
 
 def _is_mutating_sink_call(call: ast.Call) -> bool:
+    """True when ``call`` is a dangerous sink, matched STRUCTURALLY on the
+    resolved dotted attribute chain (``_dotted``) -- never on a substring or
+    bare-name test against a call's own identifier text. Round 3 (2026-07-23,
+    sink-substring-fix lane) replaced the previous ``"subprocess" in name``
+    substring check (which fired on ANY call whose bare/dotted name merely
+    CONTAINED the word "subprocess" -- including a bare call to a
+    user-defined helper literally named ``_run_subprocess``, the live
+    vllm-ops-mcp false-positive this lane fixed) with exact membership in
+    ``_SINK_DOTTED_EXACT``: since ``_dotted`` only ever inserts a "." when
+    the call is a real ``ast.Attribute`` access, a bare ``Name`` call (no
+    receiver at all) can never match this set, structurally ruling out the
+    "user-defined function whose NAME contains a sink word" false-positive
+    class entirely.
+
+    The ``_MUTATING_SINK_SHORT`` fallback (HTTP verbs, subprocess/os short
+    names reached via SOME attribute receiver, e.g. ``session.post(...)``)
+    had the identical bug one level down: exact-equality on the call's own
+    short name, with no requirement that the call even BE an attribute
+    access -- a bare call to a user-defined function literally named ``run``
+    or ``post`` matched it too. Gated behind ``"." in name`` below: only
+    ``x.run(...)``-shaped attribute calls are eligible, never a bare
+    ``run(...)``. This is still a name-based heuristic for the receiver's
+    identity (no type resolution is attempted), disclosed and unchanged in
+    that respect from before this fix -- only the bare-call false-positive
+    class is closed."""
     name = _dotted(call.func)
-    short = name.split(".")[-1] if name else ""
-    if "subprocess" in name:
+    if not name:
+        return False
+    short = name.split(".")[-1] if "." in name else name
+    if name in _SINK_DOTTED_EXACT:
         return True
-    if name in ("os.system", "os.popen", "os.remove", "os.unlink", "os.rmdir"):
-        return True
-    if name in ("shutil.rmtree", "shutil.move"):
-        return True
-    if short in _MUTATING_SINK_SHORT:
+    if "." in name and short in _MUTATING_SINK_SHORT:
         return True
     if short == "open":
         mode = None
@@ -209,9 +337,57 @@ def _is_mutating_sink_call(call: ast.Call) -> bool:
     return False
 
 
+def _is_shell_true(call: ast.Call) -> bool:
+    """True when ``call`` passes a truthy ``shell=`` keyword -- the
+    well-known, AST-visible signature of real shell-injection risk for
+    ``subprocess.run``/``Popen``/``call``/``check_output``/``check_call``
+    (a string command interpreted by ``/bin/sh``, vs. a fixed argv LIST with
+    no shell metacharacter interpretation when ``shell`` is absent/False)."""
+    for kw in call.keywords:
+        if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value:
+            return True
+    return False
+
+
+def _is_high_risk_sink_call(call: ast.Call) -> bool:
+    """A stricter subset of ``_is_mutating_sink_call``, used ONLY for
+    SEVERITY/CONFIDENCE calibration -- never for the is-this-a-sink-at-all
+    classification, which stays exactly as broad (over-flag-safe) via
+    ``_is_mutating_sink_call``. Round 3 (2026-07-23): the one axis where "is
+    it a sink" and "is it HIGH severity" honestly diverge is
+    ``subprocess.run``/``Popen``/``call``/``check_output``/``check_call``:
+    these accept a literal argv LIST with no shell interpretation unless
+    ``shell=True`` is explicitly passed (see ``_is_shell_true``). Its absence
+    -- a fixed argv list executed directly, e.g. vllm-ops-mcp's
+    ``_run_subprocess(["nvidia-smi", "--query-gpu=..."], ...)`` read-only
+    probe -- is a materially lower-risk shape than a shell-interpreted
+    string command. This is NOT a suppression: ``_is_mutating_sink_call``
+    still returns True for it (the finding still surfaces), only its
+    severity/confidence are calibrated down (see ``run()``/
+    ``_scan_low_level_sdk()``). Every OTHER sink pattern (``os.system``/
+    ``os.popen`` -- always shell-interpreted by construction, no argv-list
+    form exists; ``os.remove``/``unlink``/``rmdir``/``shutil.rmtree``/
+    ``move`` -- unconditional filesystem mutation; HTTP
+    post/put/delete/patch; sendmail; open-for-write) stays unconditionally
+    high-risk, identical to ``_is_mutating_sink_call``."""
+    name = _dotted(call.func)
+    if not name:
+        return False
+    if name in _SUBPROCESS_RUN_LIKE:
+        return _is_shell_true(call)
+    return _is_mutating_sink_call(call)
+
+
 def _body_has_mutating_sink(node: ast.AST) -> bool:
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call) and _is_mutating_sink_call(sub):
+            return True
+    return False
+
+
+def _body_has_high_risk_sink(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and _is_high_risk_sink_call(sub):
             return True
     return False
 
@@ -478,7 +654,7 @@ class ToolScopeCreepDetector(Detector):
 
                 tool_name = _declared_tool_name(tool_deco, node.name)
                 by_name = bool(_MUTATING_VERB.match(tool_name)) or bool(_MUTATING_VERB.match(node.name))
-                sink_hit, indirect_gate = self._inspect_body(
+                sink_hit, indirect_gate, high_risk_hit = self._inspect_body(
                     node, f, files_by_rel, import_map, class_methods, func_index
                 )
                 is_mutating = by_name or sink_hit
@@ -489,8 +665,12 @@ class ToolScopeCreepDetector(Detector):
                 if gated:
                     continue
 
-                sev = Severity.P1 if sink_hit else Severity.P2
-                conf = Confidence.HIGH if sink_hit else Confidence.MEDIUM
+                # Round 3 (2026-07-23): severity/confidence are keyed on
+                # high_risk_hit, not the broader sink_hit -- see
+                # `_is_high_risk_sink_call` for the one deliberate axis where
+                # they diverge (subprocess without shell=True).
+                sev = Severity.P1 if high_risk_hit else Severity.P2
+                conf = Confidence.HIGH if high_risk_hit else Confidence.MEDIUM
                 findings.append(Finding(
                     vuln_class=self.name,
                     title=f"Mutating tool '{tool_name}' has no visible permission gate",
@@ -554,7 +734,7 @@ class ToolScopeCreepDetector(Detector):
 
         out: list[Finding] = []
         for tool_name, stmts, _shared in segments:
-            sink_hit, indirect_gate = self._inspect_stmts(stmts, file_func_index, file_gated_names)
+            sink_hit, indirect_gate, high_risk_hit = self._inspect_stmts(stmts, file_func_index, file_gated_names)
             by_name = bool(tool_name) and bool(_MUTATING_VERB.match(tool_name))
             is_mutating = by_name or sink_hit
             if not is_mutating:
@@ -564,8 +744,10 @@ class ToolScopeCreepDetector(Detector):
             if gated:
                 continue
 
-            sev = Severity.P1 if sink_hit else Severity.P2
-            conf = Confidence.HIGH if sink_hit else Confidence.MEDIUM
+            # Round 3 (2026-07-23): see the matching comment in run() --
+            # severity/confidence key on high_risk_hit, not sink_hit.
+            sev = Severity.P1 if high_risk_hit else Severity.P2
+            conf = Confidence.HIGH if high_risk_hit else Confidence.MEDIUM
             line = stmts[0].lineno if stmts else handler.lineno
             if tool_name:
                 subject = f"Tool '{tool_name}'"
@@ -599,11 +781,15 @@ class ToolScopeCreepDetector(Detector):
             ))
         return out
 
-    def _inspect_stmts(self, stmts: list[ast.stmt], func_index: dict, gated_names: set) -> tuple[bool, bool]:
+    def _inspect_stmts(self, stmts: list[ast.stmt], func_index: dict, gated_names: set) -> tuple[bool, bool, bool]:
         """Same one-hop helper-delegation logic as ``_inspect_body``, scoped
         to a ``dispatch_segments`` branch (a list of statements) instead of a
-        single function node."""
+        single function node. Returns (sink_hit, indirect_gate,
+        high_risk_hit) -- ``high_risk_hit`` (round 3, 2026-07-23) mirrors
+        ``_inspect_body``'s severity-calibration signal; see
+        ``_is_high_risk_sink_call``."""
         sink_hit = any(_body_has_mutating_sink(s) for s in stmts)
+        high_risk_hit = any(_body_has_high_risk_sink(s) for s in stmts)
         indirect_gate = False
         for stmt in stmts:
             for sub in ast.walk(stmt):
@@ -616,9 +802,11 @@ class ToolScopeCreepDetector(Detector):
                 for _cf, cnode in func_index[short]:
                     if not sink_hit and _body_has_mutating_sink(cnode):
                         sink_hit = True
+                    if not high_risk_hit and _body_has_high_risk_sink(cnode):
+                        high_risk_hit = True
                     if short in gated_names:
                         indirect_gate = True
-        return sink_hit, indirect_gate
+        return sink_hit, indirect_gate, high_risk_hit
 
     def _stmts_have_gate(self, f: SourceFile, stmts: list[ast.stmt]) -> bool:
         if not stmts:
@@ -785,12 +973,17 @@ class ToolScopeCreepDetector(Detector):
         import_map: dict[str, tuple[SourceFile, str | None]],
         class_methods: dict[tuple[str, str], ast.AST],
         same_file_func_index: dict,
-    ) -> tuple[bool, bool]:
-        """Return (sink_hit, indirect_gate) considering one hop through any
-        helper function this tool's body plainly calls -- import-aware
-        first, then same-file (round-2 N-vote fix; see
-        ``_resolve_call_targets``)."""
+    ) -> tuple[bool, bool, bool]:
+        """Return (sink_hit, indirect_gate, high_risk_hit) considering one
+        hop through any helper function this tool's body plainly calls --
+        import-aware first, then same-file (round-2 N-vote fix; see
+        ``_resolve_call_targets``). ``high_risk_hit`` (round 3, 2026-07-23)
+        is a strict subset of ``sink_hit`` used only for severity/confidence
+        calibration -- see ``_is_high_risk_sink_call``; it never widens or
+        narrows ``sink_hit``/``indirect_gate``, which keep their pre-round-3
+        over-flag-safe semantics unchanged."""
         sink_hit = _body_has_mutating_sink(node)
+        high_risk_hit = _body_has_high_risk_sink(node)
         indirect_gate = False
         for sub in ast.walk(node):
             if not isinstance(sub, ast.Call):
@@ -804,16 +997,19 @@ class ToolScopeCreepDetector(Detector):
             if not candidates:
                 continue
             any_sink = any(_body_has_mutating_sink(cn) for _cf, cn in candidates)
+            any_high_risk = any(_body_has_high_risk_sink(cn) for _cf, cn in candidates)
             all_gated = all(_node_has_gate(cf, cn) for cf, cn in candidates)
             if any_sink and not sink_hit:
                 sink_hit = True
+            if any_high_risk and not high_risk_hit:
+                high_risk_hit = True
             # Ambiguous candidates that disagree on gate status withhold
             # credit for THIS call (over-flag-safe, P0-2 fix) rather than
             # unioning any single gated candidate's status onto the whole
             # bare name.
             if all_gated:
                 indirect_gate = True
-        return sink_hit, indirect_gate
+        return sink_hit, indirect_gate, high_risk_hit
 
     def _build_function_index_for_file(self, f: SourceFile) -> dict:
         """name -> [(SourceFile, FunctionDef/AsyncFunctionDef), ...] within
