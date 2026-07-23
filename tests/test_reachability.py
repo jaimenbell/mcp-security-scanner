@@ -42,13 +42,16 @@ def test_cross_file_called_helper_is_reachable(graded):
     assert _by_snippet(graded, '"build ').reachability is Reachability.REACHABLE
 
 
-def test_dead_helper_is_unreachable(graded):
-    assert _by_snippet(graded, '"dead ').reachability is Reachability.UNREACHABLE
+def test_dead_helper_is_uncalled(graded):
+    # 2026-07-22: refined from the old blanket UNREACHABLE -- zero callers
+    # anywhere in the repo is now the more specific UNCALLED grade.
+    assert _by_snippet(graded, '"dead ').reachability is Reachability.UNCALLED
 
 
-def test_imported_but_uncalled_helper_is_unreachable(graded):
+def test_imported_but_uncalled_helper_is_uncalled(graded):
     # import != call: orphan_build is imported by server.py but never called.
-    assert _by_snippet(graded, '"orphan ').reachability is Reachability.UNREACHABLE
+    # 2026-07-22: refined from UNREACHABLE to UNCALLED (see above).
+    assert _by_snippet(graded, '"orphan ').reachability is Reachability.UNCALLED
 
 
 def test_module_level_code_is_unknown(graded):
@@ -64,7 +67,8 @@ def test_reachable_keeps_high_confidence(graded):
 
 
 def test_unreachable_lowers_confidence(graded):
-    # Same HIGH detector confidence, lowered to MEDIUM because it's unreachable.
+    # Same HIGH detector confidence, lowered to MEDIUM because it's not
+    # reachable from a tool (UNCALLED as of 2026-07-22, see above).
     assert _by_snippet(graded, '"dead ').confidence is Confidence.MEDIUM
 
 

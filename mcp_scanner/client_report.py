@@ -42,6 +42,8 @@ from .models import ScanResult, Finding, Severity, Confidence, Reachability, Tai
 # Compact, client-readable labels for the reachability grade.
 REACHABILITY_LABEL = {
     Reachability.REACHABLE: "reachable",
+    Reachability.CLI_ONLY: "cli-only (not tool-reachable)",
+    Reachability.UNCALLED: "uncalled (dead code)",
     Reachability.UNREACHABLE: "unreachable",
     Reachability.UNKNOWN: "unknown",
 }
@@ -334,9 +336,16 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
     L += ["_Reachable?_ = whether the flagged code sits inside a registered "
           "MCP tool handler or a function transitively called from one "
           "(same-file call-graph exact, cross-file best-effort). "
-          "**reachable** raises confidence, **unreachable** lowers it; "
-          "**unknown** = non-Python surface, module-level code, or no "
-          "discoverable tools. No finding is ever dropped on this basis.", ""]
+          "**reachable** raises confidence; **cli-only** (a real caller "
+          "exists, but every one traces to a non-tool entrypoint -- argv/ "
+          "CLI-main, an admin script, a test file) and **uncalled** (no "
+          "caller found anywhere) both lower it, same as the legacy "
+          "**unreachable** label; **unknown** = non-Python surface, "
+          "module-level code, no discoverable tools, or dynamic dispatch "
+          "(getattr/locals/globals) present that could hide a real caller. "
+          "No finding is ever dropped on this basis. cli-only/uncalled "
+          "findings carry their caller-chain evidence in the JSON output's "
+          "`reachability_evidence` field.", ""]
     L += ["_Tainted?_ = whether a TOOL PARAMETER's value provably flows into "
           "the flagged sink (dataflow, not just reachability): sources are the "
           "registered tool handlers' parameters, propagated through "

@@ -37,8 +37,16 @@ python -m mcp_scanner.cli <path-to-mcp-server>          # markdown report
 python -m mcp_scanner.cli <path> --json                 # JSON
 python -m mcp_scanner.cli <path> --client-report --client-name "Acme"  # 8-section client report
 python -m mcp_scanner.cli <path> --fail-on P1           # CI gate: exit 2 on P0/P1
+python -m mcp_scanner.cli <path> --fail-on P1 --include-cli-only-in-gate  # also gate on cli-only findings
 python -m mcp_scanner.cli --self-audit                  # scan your own fleet's servers
 ```
+
+`--fail-on` excludes `reachability: cli-only` findings by default — a
+cli-only finding's only known caller traces to a non-tool entrypoint (argv/
+CLI-main, an admin script, a test file), never a registered MCP tool, so it
+does not block a build gate unless your CLI/admin surface is itself part of
+the attacker-reachable scope you want gated (a publicly-exposed management
+CLI, say) — pass `--include-cli-only-in-gate` to opt back in.
 
 `--self-audit` reads the directory to scan from the `MCP_SCANNER_FLEET_ROOT`
 environment variable — there is no baked-in default, so this repo carries no
@@ -90,7 +98,7 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 202 tests (195 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer + the CI README count-verification gate's own unit tests
+python -m pytest -q     # 216 tests (209 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix (incl. the cli-only/uncalled decidable-reachability grades) + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer + the CI README count-verification gate's own unit tests
 ```
 
 CI (`.github/workflows/ci.yml`) runs this suite on every push/PR and fails the

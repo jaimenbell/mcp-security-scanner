@@ -44,12 +44,26 @@ to make the suppression auditable, and should be trimmed to the minimum.
 | 4. Update baseline | 3 min | Add false-positive + accepted-risk entries with note + date. Remove resolved entries. |
 
 A `reachable: unknown` finding is not automatically "needs a look" --
-`unknown` means the scanner couldn't decide, not that a human can't. Check
-the finding's actual callers first: if the only call path back to it is
-operator-supplied input (CLI argv, a config file, an admin script) with
-zero MCP-tool-registered callers reaching it, that's a decidable false
-positive, not an unsure verdict -- baseline it and move on (seen live:
-`rag-mcp/lock.py:144`, 2026-07-22 dogfood, one grep + two reads).
+`unknown` means the scanner couldn't decide, not that a human can't. As of
+2026-07-22 the scanner automates most of this check itself: a finding whose
+only known caller traces to a non-tool entrypoint (CLI argv, an admin
+script, a test file -- never a registered MCP tool) is graded
+`reachable: cli-only`, and one with no caller anywhere in the repo is
+graded `reachable: uncalled` -- both carry the caller-chain in
+`reachability_evidence` so you don't have to re-derive it by hand (this is
+exactly what the `rag-mcp/lock.py:144` dogfood finding needed: one grep +
+two reads, now done statically). Baseline a `cli-only`/`uncalled` finding
+straight from the evidence field, no manual call-chain check needed, UNLESS
+your CLI/admin surface is itself attacker-reachable in your deployment (a
+public management CLI, say) -- then treat it like any other finding.
+`--fail-on` gates already exclude `cli-only` by default (pass
+`--include-cli-only-in-gate` if your CLI surface should block the gate).
+Plain `unknown` still means genuinely undecidable (dynamic dispatch --
+`getattr`/`locals`/`globals` -- or no discoverable tools at all): for THAT
+case, check the finding's actual callers by hand as before -- if the only
+call path back to it is operator-supplied input with zero MCP-tool-
+registered callers reaching it, that's a decidable false positive, not an
+unsure verdict -- baseline it and move on.
 | 5. Write digest | 7 min | Fill `DIGEST_TEMPLATE.md` top to bottom. Sections with nothing to report get one honest line, not filler. |
 
 Hard stop at 30 minutes: if the clock runs out, send the digest with what
