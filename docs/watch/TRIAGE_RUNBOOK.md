@@ -42,6 +42,14 @@ to make the suppression auditable, and should be trimmed to the minimum.
 | 2. Diff vs baseline | 5 min | List findings in the new report whose fingerprint is NOT in `baseline.json` (net-new), and baseline entries absent from the report (resolved). No report shared this month = counts-only digest; say so in the Coverage note, do not guess. |
 | 3. Triage net-new | 10 min | For each net-new finding: read its detail/remediation/confidence in the report; verdict = REAL / FALSE POSITIVE / ACCEPTED RISK. Unsure after 3 minutes on one finding = verdict "REAL -- needs a look", schedule a 15-min call; do NOT burn the clock going spelunking. |
 | 4. Update baseline | 3 min | Add false-positive + accepted-risk entries with note + date. Remove resolved entries. |
+
+A `reachable: unknown` finding is not automatically "needs a look" --
+`unknown` means the scanner couldn't decide, not that a human can't. Check
+the finding's actual callers first: if the only call path back to it is
+operator-supplied input (CLI argv, a config file, an admin script) with
+zero MCP-tool-registered callers reaching it, that's a decidable false
+positive, not an unsure verdict -- baseline it and move on (seen live:
+`rag-mcp/lock.py:144`, 2026-07-22 dogfood, one grep + two reads).
 | 5. Write digest | 7 min | Fill `DIGEST_TEMPLATE.md` top to bottom. Sections with nothing to report get one honest line, not filler. |
 
 Hard stop at 30 minutes: if the clock runs out, send the digest with what
