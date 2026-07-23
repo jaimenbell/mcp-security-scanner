@@ -30,11 +30,16 @@ from mcp_scanner.detectors.secret_handling import (
     _is_test_fixture_path,
     _is_self_signed_test_cert,
 )
+from mcp_scanner.models import Confidence
 
 PEM_DIR = Path(__file__).parent / "fixtures" / "pem_material"
 
 
 def test_selfsigned_cert_at_test_path_demoted():
+    # Round-3 N-vote P0-B fix: demotion is confidence-only, never
+    # zero-trace -- a demoted test cert still emits a finding (LOW
+    # confidence, tagged "(test-cert)"), it never fully vanishes.
+    #
     # tracked path is relative to ctx.root -- point root at "tests/" so the
     # tracked-relative path carries a "fixtures" test-path segment and
     # content inspection can resolve to the real file on disk.
@@ -44,7 +49,9 @@ def test_selfsigned_cert_at_test_path_demoted():
     )
     findings = SecretHandlingDetector().run(ctx)
     tf = [f for f in findings if f.vuln_class == "tracked-secret-file"]
-    assert tf == [], f"self-signed test cert at a test path must be demoted, got {tf}"
+    assert tf, "a demoted test cert must still emit a finding, never zero-trace"
+    assert tf[0].confidence == Confidence.LOW
+    assert "test-cert" in tf[0].title
 
 
 def test_selfsigned_cert_outside_test_path_still_flagged():
@@ -80,7 +87,9 @@ def test_selfsigned_key_paired_with_selfsigned_cert_demoted():
     )
     findings = SecretHandlingDetector().run(ctx)
     tf = [f for f in findings if f.vuln_class == "tracked-secret-file"]
-    assert tf == [], f"a private key paired with a self-signed test cert must be demoted, got {tf}"
+    assert len(tf) == 2, f"both cert and key must still emit findings (demoted), got {tf}"
+    assert all(f.confidence == Confidence.LOW for f in tf)
+    assert all("test-cert" in f.title for f in tf)
 
 
 def test_mismatched_key_beside_unrelated_selfsigned_cert_still_flagged():
