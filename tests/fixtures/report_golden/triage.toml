@@ -1,0 +1,15 @@
+# Human triage pass for the golden fixture scan (synthetic).
+[findings.2de1378d5d7a]
+verdict = "confirmed"
+note = "Reproduced by hand: the run_command tool's cmd parameter reaches the shell unmodified."
+reviewed_by = "Jaimen"
+
+[findings.ef3a4cf8b6b2]
+verdict = "accepted-risk"
+note = "Deliberate admin tool; deployment is tailnet-only. Revisit if exposure changes."
+reviewed_by = "Jaimen"
+
+[findings.e28dfff3c483]
+verdict = "false-positive"
+note = "Obviously-fake fixture token in the test suite; scanner already demoted it (fake-marker)."
+reviewed_by = "Jaimen"

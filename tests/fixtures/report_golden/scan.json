@@ -1,0 +1,59 @@
+{
+  "target": "C:/scans/acme-mcp",
+  "files_scanned": 14,
+  "counts_by_severity": {"P0": 1, "P1": 1, "P2": 1, "P3": 0},
+  "clean_bill": false,
+  "findings": [
+    {
+      "vuln_class": "param-injection",
+      "title": "subprocess with shell=True on a tool parameter",
+      "severity": "P0",
+      "confidence": "high",
+      "file": "srv/tools.py",
+      "line": 42,
+      "detail": "subprocess.run(cmd, shell=True) where cmd derives from the run_command tool's parameter",
+      "remediation": "Use an argv list; never shell=True on caller-influenced input.",
+      "snippet": "subprocess.run(cmd, shell=True)",
+      "reachability": "reachable",
+      "reachability_evidence": "",
+      "taint": "tainted",
+      "finding_id": "2de1378d5d7a"
+    },
+    {
+      "vuln_class": "tool-scope-creep",
+      "title": "mutating tool registered with no visible gate",
+      "severity": "P1",
+      "confidence": "medium",
+      "file": "srv/tools.py",
+      "line": 88,
+      "detail": "delete_records is a mutating @mcp.tool() with no permission-group gate or env-flag opt-in in its file",
+      "remediation": "Gate the tool behind an explicit permission group, default OFF.",
+      "snippet": "@mcp.tool()",
+      "reachability": "reachable",
+      "reachability_evidence": "",
+      "taint": "unknown",
+      "finding_id": "ef3a4cf8b6b2"
+    },
+    {
+      "vuln_class": "secret-handling",
+      "title": "hardcoded secret assignment",
+      "severity": "P2",
+      "confidence": "low",
+      "file": "tests/conftest.py",
+      "line": 7,
+      "detail": "TEST_TOKEN assigned a secret-shaped literal (fake-marker)",
+      "remediation": "Move to an env var, or keep as an obviously-fake fixture value.",
+      "snippet": "TEST_TOKEN = \"fake-test-token-do-not-use\"",
+      "reachability": "unknown",
+      "reachability_evidence": "",
+      "taint": "unknown",
+      "finding_id": "e28dfff3c483"
+    }
+  ],
+  "errors": [],
+  "scan_meta": {
+    "scanner_version": "88b133c",
+    "suite_counts": {"total": 346, "passed": 337, "skipped": 9},
+    "scan_date": "2026-07-23"
+  }
+}

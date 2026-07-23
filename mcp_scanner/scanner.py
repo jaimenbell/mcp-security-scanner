@@ -99,9 +99,12 @@ def build_context(target: str) -> tuple[RepoContext, list[str]]:
 
 def scan_repo(target: str, detectors: list[Detector] | None = None) -> ScanResult:
     """Scan one repo path and return a ScanResult."""
+    import datetime as _dt
+
     detectors = detectors if detectors is not None else ALL_DETECTORS
     ctx, errors = build_context(target)
-    result = ScanResult(target=str(Path(target).resolve()), files_scanned=len(ctx.files))
+    result = ScanResult(target=str(Path(target).resolve()), files_scanned=len(ctx.files),
+                        scan_date=_dt.date.today().isoformat())
     result.errors.extend(errors)
     for det in detectors:
         try:

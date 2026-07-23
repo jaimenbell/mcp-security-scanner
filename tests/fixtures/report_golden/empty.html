@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Week-1 Audit -- Acme Corp</title>
+<style>
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a;
+       margin: 0 auto; max-width: 52rem; padding: 2rem 1.5rem; line-height: 1.55;
+       background: #ffffff; }
+h1 { font-size: 1.7rem; border-bottom: 3px solid #1a1a1a; padding-bottom: .4rem; }
+h2 { font-size: 1.25rem; margin-top: 2.2rem; border-bottom: 1px solid #999;
+     padding-bottom: .25rem; }
+h3 { font-size: 1.02rem; margin-top: 1.6rem; }
+table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .92rem; }
+th, td { border: 1px solid #bbb; padding: .35rem .55rem; text-align: left;
+         vertical-align: top; }
+th { background: #f0efe9; }
+code { font-family: Consolas, 'Courier New', monospace; font-size: .88em;
+       background: #f4f3ee; padding: .05rem .25rem; }
+.warn { border: 2px solid #a33; background: #fbeeee; padding: .7rem 1rem;
+        margin: 1rem 0; }
+.warn strong { color: #a33; }
+.finding { border: 1px solid #ccc; border-left: 5px solid #888;
+           padding: .6rem 1rem; margin: .9rem 0; page-break-inside: avoid; }
+.finding.sev-P0 { border-left-color: #a31515; }
+.finding.sev-P1 { border-left-color: #c96a11; }
+.finding.sev-P2 { border-left-color: #a08a00; }
+.finding.sev-P3 { border-left-color: #4a7a4a; }
+.badge { display: inline-block; font-family: Consolas, monospace;
+         font-size: .78rem; border: 1px solid #888; padding: .05rem .4rem;
+         margin-right: .3rem; background: #f4f3ee; }
+.meta-table td:first-child { width: 15rem; font-weight: bold; }
+.boundary p { margin: .5rem 0 1rem 0; }
+footer { margin-top: 2.5rem; font-size: .8rem; color: #555;
+         border-top: 1px solid #999; padding-top: .5rem; }
+@media print {
+  body { max-width: none; padding: 0; font-size: 11pt; }
+  h2 { page-break-after: avoid; }
+  .finding { page-break-inside: avoid; }
+}
+</style></head><body>
+<h1>Week-1 Audit &mdash; Acme Corp</h1>
+<h2>1. Engagement &amp; scan metadata</h2>
+<table class="meta-table">
+<tr><td>Client</td><td>Acme Corp</td></tr>
+<tr><td>Engagement</td><td>Week-1 Audit</td></tr>
+<tr><td>Scope</td><td>1 MCP server</td></tr>
+<tr><td>Target</td><td>C:/scans/clean-mcp</td></tr>
+<tr><td>Scan date</td><td>2026-07-23</td></tr>
+<tr><td>Scanner version (git)</td><td>88b133c</td></tr>
+<tr><td>Scanner test suite at that version</td><td>346 tests (337 passing, 9 environment-gated skips)</td></tr>
+<tr><td>Triage annotations</td><td>(none supplied -- all findings unreviewed)</td></tr>
+</table>
+<h2>2. Executive summary</h2>
+<p>The scanner produced 0 raw finding(s) across 6 scanned file(s) in `clean-mcp`. No triage annotations were supplied: every finding below is UNREVIEWED. Treat this as the scanner&#x27;s raw, deliberately over-flagging output, not a human-verified risk list.</p>
+<p>Clean bill of health for `clean-mcp`: the scan found no critical (P0) or high (P1) findings. Per the methodology section, this means no critical/high patterns were found by these detectors -- not a guarantee of security.</p>
+<p><strong>Severity legend:</strong> <strong>P0</strong> = Critical -- exploitable now, no preconditions; <strong>P1</strong> = High -- exploitable with attacker-reachable but currently-unmet conditions; <strong>P2</strong> = Medium -- defense-in-depth gap / conditional; <strong>P3</strong> = Low -- hardening nit.</p>
+<table><tr><th>Severity</th><th>Confirmed</th><th>False positive</th><th>Accepted risk</th><th>Mitigated</th><th>Unreviewed</th><th>Raw</th></tr>
+<tr><td>P0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>P1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>P2</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>P3</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+</table>
+<p><strong>Top-3 risks (confirmed first, then unreviewed):</strong></p>
+<p><em>None &mdash; every raw finding was dismissed, accepted, or mitigated in triage (or the scan was clean).</em></p>
+<h2>3. Triage summary</h2>
+<p>No triage pass has been applied yet -- the raw count below is NOT a risk count. This scanner over-flags by design; expect a substantial share of raw findings to fall to human review.</p>
+<table><tr><th>Verdict</th><th>Count</th></tr>
+<tr><td>Confirmed</td><td>0</td></tr>
+<tr><td>False positive</td><td>0</td></tr>
+<tr><td>Accepted risk</td><td>0</td></tr>
+<tr><td>Mitigated</td><td>0</td></tr>
+<tr><td>Unreviewed</td><td>0</td></tr>
+<tr><th>Raw total</th><th>0</th></tr>
+</table>
+<h2>4. Findings detail</h2>
+<p><em>No findings in this scan.</em></p>
+<h2>5. Methodology &amp; honest capability boundary</h2>
+<div class="boundary">
+<p>Stated plainly so the tool-vs-expert split is contractual, not verbal:</p>
+<p><strong>Static analysis only.</strong> Every finding comes from reading the target&#x27;s git-tracked source (Python AST for the deep path; regex for Jinja/JS/TS/YAML/PowerShell/bash surfaces). No code is executed, no server is run, and no finding is proven exploitable at runtime -- findings are a prioritized review queue, not a verdict.</p>
+<p><strong>Manifest-aware tool reachability grading.</strong> After the detectors run, the scanner discovers registered MCP tools (decorator registrations, the low-level SDK&#x27;s Server()/list_tools/call_tool shape, and any server.json manifest) and walks a static call-graph to label each finding reachable, cli-only, uncalled, or unknown. Reachable raises a finding&#x27;s confidence; the others lower it; a finding is never dropped on this basis. Limits: the same-file call-graph is exact, cross-file is best-effort; module-level code, non-Python findings, ambiguous low-level-SDK dispatch, and repos with no discoverable tools are labelled unknown rather than guessed.</p>
+<p><strong>Tool-parameter taint tracking v1.</strong> A second pass seeds every registered tool handler&#x27;s parameters as taint sources and propagates them through assignments, f-strings/concat/format, containers, and same-repo calls into the dangerous sinks, labelling findings tainted / untainted / unknown (again nudging confidence, never dropping). Limits, stated plainly: same-file dataflow is transitive but cross-file follows at most two direct-import hops (no third hop, no cross-repo flow); it is NOT sanitizer-aware (a validated/escaped value still counts as tainted, by design over-flagging); and dynamic dispatch (getattr / *args / **kwargs), decorator transforms, and non-Python surfaces are labelled unknown.</p>
+<p><strong>Confidence is load-bearing.</strong> This is a deliberately over-flagging scanner: low-confidence findings mean &#x27;a human should glance at this&#x27; and produce false positives by design. The triage pass in this report is where a human separates the two -- the raw finding count is not the risk count.</p>
+<p><strong>The one law of suppression.</strong> Full suppression is reserved for the scanner&#x27;s OWN curated exact-match judgment (e.g. documented SDK placeholder credentials, pagination-cursor field names, provably self-signed test certificates with test-identity CN/SAN). Every other signal -- a target-authored suppress comment, an obviously-fake value marker, a cert&#x27;s test path -- may only demote confidence and tag the finding; it may never make a finding disappear. This matters because the scanner&#x27;s use case is third-party, possibly-adversarial repos.</p>
+<p><strong>Not a git-history scanner.</strong> The secret detector reads the tracked working tree only -- it does not see credentials that were committed and later removed. Pair it with gitleaks for history scanning.</p>
+<p><strong>Language coverage.</strong> Deep (AST-based) for Python. JS/TS (.js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) is line-based regex, not a parse tree: four detector families have JS/TS parity on that regex basis (param-injection, tool-scope-creep, secret-leak-via-tool-response, secret-in-log), while codegen-injection and auth-posture remain Python-only by scope decision. Jinja templates are regex-level. Known regex-heuristic gaps (e.g. optional-chaining eval, spread-of-secret returns) are documented in the README rather than silently missed.</p>
+<p><strong>Every finding needs a human.</strong> No dynamic analysis means no proof of exploitability: every finding in this report was either confirmed, dismissed, or left unreviewed by a named human triage pass, and the report says which, per finding. A clean bill means no critical/high patterns were found by these detectors -- not a guarantee of security.</p>
+</div>
+<h2>6. Appendix</h2>
+<h3>Detector families</h3>
+<table><tr><th>Class</th><th>What it checks</th></tr>
+<tr><td><code>codegen-injection</code></td><td>Jinja `autoescape` off in a code-generating tool; hand-rolled string escaping instead of a real serializer.</td></tr>
+<tr><td><code>param-injection</code></td><td>`subprocess(shell=True)`, `os.system`, non-constant `eval`/`exec`, `pickle.load`, unsafe `yaml.load`, SSRF, path traversal.</td></tr>
+<tr><td><code>auth-posture</code></td><td>Bind `0.0.0.0` (+debug escalation), `debug=True`, mutating routes with no auth dependency, no rate limiter.</td></tr>
+<tr><td><code>secret-handling</code></td><td>Tracked `.env`/`.pem`/`.key`/keypair files, hardcoded secret-shaped literals, secrets passed to `print`/`log.*`.</td></tr>
+<tr><td><code>tool-scope-creep</code></td><td>A mutating `@mcp.tool()`-registered tool (by verb-name heuristic or a dangerous body sink, one hop through a delegated helper) with no visible permission-group gate or env-flag opt-in anywhere in its file or the helper it calls.</td></tr>
+<tr><td><code>secret-leak-via-tool-response</code></td><td>A tool&#x27;s `return` value that hands back `os.environ`, a whole config/settings object (`vars()`/`asdict()`/`__dict__`), a secret-named field, or a hardcoded secret-shaped literal to the calling LLM.</td></tr>
+<tr><td><code>job-hazards</code></td><td>Scheduled jobs/wrappers/IaC-CI files (cron, systemd, GitHub Actions, PowerShell/bash/batch deploy scripts): over-broad credential/ACL scope, a destructive call with no confirm-before-destroy gate, and success reported without verification (`|| true`, bare `exit 0`, `continue-on-error`, empty `catch {}`).</td></tr>
+</table>
+<h3>Scan configuration</h3><ul>
+<li>Target: <code>C:/scans/clean-mcp</code></li>
+<li>Files scanned: 6</li>
+<li>Scanner version: <code>88b133c</code></li>
+<li>Scan notes/errors: none</li>
+</ul>
+<h3>Annotation provenance</h3><ul>
+<li>No annotations file was supplied; every verdict above is Unreviewed.</li>
+</ul>
+<footer>Generated by mcp-scan report, scanner version <code>88b133c</code>, from scan data of 2026-07-23. Print this page to PDF for a client deliverable &mdash; the file is fully self-contained.</footer>
+</body></html>
