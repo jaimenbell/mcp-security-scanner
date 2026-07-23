@@ -13,34 +13,74 @@ This detector:
    ``create_``, ``execute_``, ``run_``, ``send_``, ...) OR by body content —
    a direct dangerous sink call (subprocess/os.system/file-write/HTTP
    post-put-delete-patch/etc.), including **one hop** through a helper
-   function it plainly delegates to elsewhere in the repo (the real shape of
-   the operator's own fleet: a thin ``@mcp.tool()`` wrapper in ``server.py``
-   that calls a decorated helper in a separate ``groups/*.py`` module — see
-   github-mcp's ``write.py`` / desktop-mcp's ``groups/record.py``).
+   function it plainly delegates to (the real shape of the operator's own
+   fleet: a thin ``@mcp.tool()`` wrapper in ``server.py`` that calls a
+   decorated helper in a separate ``groups/*.py`` module — see github-mcp's
+   ``write.py`` / desktop-mcp's ``groups/record.py``, both resolved via the
+   import-aware one-hop resolver below).
 3. Flags a mutating tool with **no visible gate**: no gate decorator / env-flag
    opt-in / permission check on the tool function itself, and no gate found
    on the (one-hop) helper it delegates to.
 
-Honesty note: gate resolution is a same-file, one-hop, name-based heuristic
-— not a real call graph. It matches this repo's existing "same-file heuristic
-only" disclosure (cross-file taint tracking is explicitly out of scope), with
-one deliberate, narrow extension (a single hop through a directly-called
-helper function in THE SAME FILE) because that thin-wrapper-delegates-to-a-
-gated-helper shape is the dominant real pattern this hazard needs to not
-false-positive on. Honest cost of same-file-only: a tool that delegates to a
-helper imported from another module gets that hop dropped entirely — gate
-not visible, so the tool flags as ungated. That is the over-flag direction
-this detector already accepts everywhere else, not a new exposure.
+Honesty note (round 2, 2026-07-23, later same day — supersedes the
+same-file-only note this docstring briefly carried earlier the same day):
+one-hop resolution is BOUNDED and IMPORT-AWARE, not a real call graph or
+transitive dataflow proof. Resolution order per call, first match wins:
 
-Same-file scoping closed 2026-07-23 (N-vote refuter live repro): this
-detector's ``func_index``/``gated_names`` used to be built REPO-WIDE by bare
-short function name in ``run()`` — an unrelated, never-imported, same-named
-gated helper anywhere else in the repo could silence a genuinely ungated
-mutating tool's own one-hop helper (a false NEGATIVE, the worse direction for
-this detector's primary target class). Both the decorator-registered path
-(``run()``) and the low-level SDK dispatch path now build this index
-same-file-only via the shared ``_build_function_index_for_file`` — see that
-method's docstring for the full history.
+  1. **Import-aware.** ``local(...)`` / ``local.attr(...)`` where ``local``
+     is bound by an explicit, statically-resolvable same-repo import in the
+     calling file — ``import mod [as alias]``, ``from x.y import z [as w]``,
+     and their relative-import equivalents (``from . import submodule`` /
+     ``from .pkg.mod import name`` / ``from ..pkg import name``). This is
+     what makes the github-mcp/desktop-mcp ``groups/*.py`` shape above
+     resolve correctly: exactly one target file, named from the import
+     statement itself — never a repo-wide guess.
+  2. **Same-file class-qualified (cheap disambiguation).**
+     ``ClassName().method(...)`` / ``ClassName.method(...)`` / a
+     ``self.method(...)``/``cls.method(...)`` call from within a method of
+     that same class — resolved to that EXACT class's own method, never
+     confused with an unrelated same-named method on a different class in
+     the same file.
+  3. **Same-file bare name (fallback).** Every function in the calling
+     file sharing the call's bare short name is a candidate. Genuinely
+     ambiguous when more than one exists (e.g. two different classes with
+     an identically-named method, neither qualified in a way step 2 can
+     resolve): sink detection is OR'd across candidates (over-flag-safe —
+     any one of them containing a sink is enough to flag); gate credit is
+     AND'd across candidates (credited ONLY if every candidate is gated —
+     disagreement withholds credit, the conservative direction for a
+     security scanner, never a unioned false-clean).
+
+Disclosed residual, stated rather than silently missed: a hop that resolves
+to NEITHER an explicit same-repo import NOR a same-file candidate (a helper
+imported from a genuinely third-party/external package, or reassigned/
+re-exported in a way this static pass can't see) is an honest miss — gate is
+not credited AND the sink is not followed for that call. For a tool whose
+own name already matches the mutating-verb heuristic this still surfaces the
+finding (over-flag, the direction this detector accepts everywhere); for a
+tool with a non-mutating name whose ENTIRE mutating behavior lives only
+behind that one unresolvable hop, this is a genuine, disclosed miss (see
+``tests/fixtures/vuln_tool_scope_unresolvable_external_hop``).
+
+History: round 1 (closing the README's named follow-up) found the
+PRE-EXISTING decorator-registered path's ``func_index``/``gated_names``
+were built REPO-WIDE by bare short function name in ``run()`` — an N-vote
+refuter proved live that an unrelated, never-imported, same-named gated
+helper anywhere else in the repo could silence a genuinely ungated mutating
+tool's own one-hop helper (false NEGATIVE, the worse direction for this
+detector's primary target class). Round 1's fix scoped resolution
+same-file-only, but two further N-vote refuters proved THAT over-corrected:
+(a) it silently severed the cross-file SINK hop too, not just the gate hop,
+for a non-mutating-named tool with a real, reachable, ungated sink one hop
+through an explicit import (total silence, not just an over-flag); (b) the
+same-file bare-name union still let an unrelated same-named method on a
+DIFFERENT class in the same file silence a genuinely ungated one. Round 2
+(this version) replaced same-file-only with the bounded, import-aware,
+one-hop resolver described above, closing both — see
+``_resolve_call_targets`` for the implementation. The low-level SDK dispatch
+path (below) is intentionally NOT touched by round 2 and stays same-file-only
+via ``_build_function_index_for_file`` — a cleanly reusable follow-up, not
+attempted here.
 
 Low-level MCP SDK coverage (2026-07-23): this detector used to consume only
 ``extract_tool_registry``'s ``source == "js-regex"`` entries and re-derive
@@ -232,33 +272,199 @@ def _module_level_env_gate(f: SourceFile) -> bool:
     return False
 
 
+# --------------------------------------------------------------------- #
+# Round-2 N-vote fix (2026-07-23, later same day): bounded, one-hop,
+# import-aware call resolution for the decorator path.
+#
+# The round-1 same-file-only fix (closing the original repo-wide
+# gate-index-collision follow-up) was itself proven to over-correct by two
+# live refuter repros: (P0-1) it severed the cross-file SINK hop, not just
+# the gate hop, silencing a genuinely ungated real sink reached through an
+# explicit, same-repo import; (P0-2) same-file bare-name resolution still
+# unioned gate status across UNRELATED same-named methods on different
+# classes in one file.
+#
+# This resolver restores cross-file coverage, but only for an EXPLICIT,
+# statically-provable same-repo import -- never a guess, never transitive
+# (one hop only): ``import mod [as alias]``, ``from x.y import z [as w]``,
+# and their relative-import equivalents (``from . import submodule`` /
+# ``from .pkg.mod import name`` / ``from ..pkg import name``). A same-file
+# call through a class instance/class name it can cheaply prove
+# (``ClassName().method(...)`` / ``ClassName.method(...)``) is resolved to
+# that EXACT class's own method, never confused with a same-named method on
+# an unrelated class in the same file. Everything else falls back to the
+# pre-existing same-file bare-name heuristic, now paired with an explicit
+# ambiguity rule: when more than one same-file bare-name candidate exists
+# and they disagree on gate status, the call's gate credit is withheld
+# (over-flag, the conservative direction for a security scanner) rather
+# than unioned.
+# --------------------------------------------------------------------- #
+def _dir_parts(rel: str) -> list[str]:
+    parts = rel.split("/")
+    return parts[:-1]
+
+
+def _module_files(parts: list[str]) -> tuple[str, str]:
+    """The two candidate repo-relative paths a dotted module ``parts`` could
+    resolve to: a plain module file, or a package's ``__init__.py``."""
+    base = "/".join(parts)
+    return f"{base}.py", f"{base}/__init__.py"
+
+
+def _resolve_from_import_base(
+    base_dir_parts: list[str], module: str | None, level: int
+) -> list[str] | None:
+    """The dotted-path parts an ``ImportFrom`` node's ``module``/``level``
+    point at, BEFORE appending an individual imported name -- ``None`` when
+    unresolvable (a relative import walking above the repo root, or an
+    absolute import with no module string, e.g. a bare ``from . import
+    x`` has ``module=None`` and is handled by the ``level`` branch)."""
+    if level and level > 0:
+        parts = list(base_dir_parts)
+        for _ in range(level - 1):
+            if not parts:
+                return None
+            parts.pop()
+        if module:
+            parts = parts + module.split(".")
+        return parts
+    if not module:
+        return None
+    return module.split(".")
+
+
+def _build_import_map(
+    f: SourceFile, files_by_rel: dict[str, SourceFile]
+) -> dict[str, tuple[SourceFile, str | None]]:
+    """local binding name -> ``(resolved_file, symbol)`` for every explicit,
+    statically-resolvable same-repo import in file ``f``. ``symbol`` is
+    ``None`` when the local name is bound to ``resolved_file`` AS A MODULE
+    (a submodule import, e.g. ``from .groups import write`` -- attribute
+    access on the local name resolves a function defined in that file);
+    it is the real defined name when the local name is bound directly to a
+    symbol living in ``resolved_file`` (e.g. ``from .groups.write import
+    delete_file``).
+
+    Bounded and honest: only ``import x[.y][ as z]`` and ``from x[.y] import
+    z [as w]`` (absolute or relative) resolving to a file actually present
+    in this scan are recorded. A dynamic import, a re-export, a name
+    reassigned after import, or a target outside the scanned repo is simply
+    ABSENT from this map -- callers must treat that as an honest miss, never
+    guess a target."""
+    out: dict[str, tuple[SourceFile, str | None]] = {}
+    if f.tree is None:
+        return out
+    base_dir_parts = _dir_parts(f.rel)
+    for node in ast.walk(f.tree):
+        if isinstance(node, ast.ImportFrom):
+            target_parts = _resolve_from_import_base(base_dir_parts, node.module, node.level or 0)
+            if target_parts is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                # Prefer the SUBMODULE reading first (`from .groups import
+                # write` -- "write" is groups/write.py, the dominant real
+                # fleet shape): does target_parts + [alias.name] resolve to
+                # an actual file?
+                sub_py, sub_pkg = _module_files(target_parts + [alias.name])
+                if sub_py in files_by_rel:
+                    out[local] = (files_by_rel[sub_py], None)
+                    continue
+                if sub_pkg in files_by_rel:
+                    out[local] = (files_by_rel[sub_pkg], None)
+                    continue
+                # Otherwise: a plain "from module import symbol" -- the
+                # symbol is defined directly IN the resolved module file.
+                mod_py, mod_pkg = _module_files(target_parts)
+                if mod_py in files_by_rel:
+                    out[local] = (files_by_rel[mod_py], alias.name)
+                elif mod_pkg in files_by_rel:
+                    out[local] = (files_by_rel[mod_pkg], alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                local = alias.asname or parts[0]
+                if alias.asname is None and len(parts) > 1:
+                    # ``import pkg.sub`` with no alias binds only the TOP
+                    # package name per real Python semantics, which cannot
+                    # usefully resolve a specific submodule file here --
+                    # an honest miss rather than a guessed target.
+                    continue
+                mod_py, mod_pkg = _module_files(parts)
+                if mod_py in files_by_rel:
+                    out[local] = (files_by_rel[mod_py], None)
+                elif mod_pkg in files_by_rel:
+                    out[local] = (files_by_rel[mod_pkg], None)
+    return out
+
+
+def _class_methods_in_file(f: SourceFile) -> dict[tuple[str, str], ast.AST]:
+    """``(ClassName, method_name) -> FunctionDef/AsyncFunctionDef`` for every
+    method defined directly in a class body in file ``f`` -- used only for
+    the cheap ``ClassName().method(...)`` / ``ClassName.method(...)``
+    call-site disambiguation (P0-2 fix)."""
+    out: dict[tuple[str, str], ast.AST] = {}
+    if f.tree is None:
+        return out
+    for node in ast.walk(f.tree):
+        if isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    out[(node.name, item.name)] = item
+    return out
+
+
+def _enclosing_class_name(f: SourceFile, node: ast.AST) -> str | None:
+    """Name of the ``ClassDef`` whose body directly contains ``node`` as a
+    method, or ``None`` -- used only for the cheap ``self.``/``cls.``
+    call-site disambiguation (a tool function that is itself a class
+    method, calling a sibling method on its own instance/class)."""
+    if f.tree is None:
+        return None
+    for candidate in ast.walk(f.tree):
+        if isinstance(candidate, ast.ClassDef) and node in candidate.body:
+            return candidate.name
+    return None
+
+
+def _find_functions_named(f: SourceFile, name: str) -> list[ast.AST]:
+    """Every ``FunctionDef``/``AsyncFunctionDef`` in file ``f`` (any nesting
+    depth) named ``name``."""
+    if f.tree is None:
+        return []
+    return [
+        n for n in ast.walk(f.tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
+    ]
+
+
 class ToolScopeCreepDetector(Detector):
     name = "tool-scope-creep"
 
     def run(self, ctx: RepoContext) -> list[Finding]:
         findings: list[Finding] = []
+        # Round-2 N-vote fix (2026-07-23, later same day): repo-wide index
+        # of every scanned file by its rel path, shared by every file's
+        # import-map resolution below (see the module-level docstring for
+        # the full history: round 1 scoped this same-file-only, which
+        # over-corrected -- severing genuinely resolvable cross-file hops
+        # too; round 2 restores them, bounded to explicit same-repo
+        # imports only, never a guess).
+        files_by_rel: dict[str, SourceFile] = {sf.rel: sf for sf in ctx.files}
 
         for f in ctx.files:
             if f.tree is None:
                 continue
             module_gate = _module_level_env_gate(f)
-            # 2026-07-23 (closing the README's named follow-up): the
-            # func_index/gated_names used for this decorator path's one-hop
-            # helper-delegation gate resolution are now built SAME-FILE-ONLY,
-            # matching the low-level path's own _build_function_index_for_file
-            # convention shipped earlier the same day. Before this fix these
-            # were built repo-wide by bare short function name -- an N-vote
-            # refuter proved live that an unrelated, never-imported, same-named
-            # gated helper elsewhere in the repo could silence a genuinely
-            # ungated decorator-registered mutating tool (a false NEGATIVE on
-            # this detector's primary target class, the worse direction than a
-            # false positive). Honest cost of same-file-only: a tool that
-            # delegates to a helper imported from ANOTHER module now gets that
-            # hop dropped -- gate not visible -> tool flags as ungated. That is
-            # the over-flag direction this detector's own docs already accept
-            # ("over-flag-rather-than-miss"), not a new exposure.
+            # Same-file bare-name fallback (round-1 convention, still used
+            # when a call resolves via neither an explicit import nor a
+            # cheap class-qualified disambiguation -- see
+            # _resolve_call_targets).
             func_index = self._build_function_index_for_file(f)
-            gated_names = self._build_gate_index(func_index)
+            import_map = _build_import_map(f, files_by_rel)
+            class_methods = _class_methods_in_file(f)
             for node in ast.walk(f.tree):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
@@ -272,7 +478,9 @@ class ToolScopeCreepDetector(Detector):
 
                 tool_name = _declared_tool_name(tool_deco, node.name)
                 by_name = bool(_MUTATING_VERB.match(tool_name)) or bool(_MUTATING_VERB.match(node.name))
-                sink_hit, indirect_gate = self._inspect_body(node, func_index, gated_names)
+                sink_hit, indirect_gate = self._inspect_body(
+                    node, f, files_by_rel, import_map, class_methods, func_index
+                )
                 is_mutating = by_name or sink_hit
                 if not is_mutating:
                     continue
@@ -487,25 +695,124 @@ class ToolScopeCreepDetector(Detector):
         return out
 
     # --- helpers ------------------------------------------------------
-    def _inspect_body(self, node: ast.AST, func_index: dict, gated_names: set) -> tuple[bool, bool]:
+    def _resolve_call_targets(
+        self,
+        call: ast.Call,
+        f: SourceFile,
+        calling_node: ast.AST,
+        files_by_rel: dict[str, SourceFile],
+        import_map: dict[str, tuple[SourceFile, str | None]],
+        class_methods: dict[tuple[str, str], ast.AST],
+        same_file_func_index: dict,
+    ) -> list[tuple[SourceFile, ast.AST]] | None:
+        """Resolve one call's target function(s), bounded, one hop, no
+        transitivity (round-2 N-vote fix). Returns a list of every
+        candidate ``(file, FunctionDef)`` a genuinely mutating-tool-relevant
+        call could reach when resolvable at all, or ``None`` when the call
+        cannot be resolved by this pass -- an honest miss, never guessed
+        (gate is not credited and sink is not followed for THIS call; see
+        the module docstring for the disclosed residual on non-mutating-
+        named tools).
+
+        Resolution order, first match wins:
+
+          1. IMPORT-AWARE -- ``local(...)`` or ``local.attr(...)`` where
+             ``local`` is bound by an explicit same-repo import in this
+             file (see ``_build_import_map``). Unambiguous by construction:
+             exactly one target file, matched by name in it.
+          2. SAME-FILE CLASS-QUALIFIED (cheap disambiguation) --
+             ``ClassName().method(...)`` / ``ClassName.method(...)`` /
+             ``self.method(...)`` or ``cls.method(...)`` from within a
+             method of the SAME class -- resolves to that exact class's
+             own method, never confused with an unrelated same-named
+             method on a different class in the same file (P0-2 fix).
+          3. SAME-FILE BARE NAME -- the pre-existing fallback: every
+             function in this file sharing the call's bare short name is a
+             candidate. Genuinely ambiguous when more than one exists;
+             callers apply an OR-for-sink / AND-for-gate rule across the
+             returned candidates (over-flag on disagreement, never a
+             unioned false gate credit)."""
+        dotted = _dotted(call.func)
+        if not dotted:
+            return None
+        parts = dotted.split(".")
+
+        # -- 1. import-aware -------------------------------------------
+        head = parts[0]
+        if head in import_map:
+            target_file, symbol = import_map[head]
+            if symbol is None:
+                # `head` is bound to a MODULE file (submodule import) --
+                # the real function is the call's own last attribute.
+                if len(parts) == 2:
+                    found = _find_functions_named(target_file, parts[1])
+                    return [(target_file, n) for n in found] if found else None
+                return None
+            # `head` is bound directly to a symbol defined in target_file --
+            # only a bare call on that exact name is within this one-hop
+            # scope (a further `.attr` on it is out of bounds).
+            if len(parts) == 1:
+                found = _find_functions_named(target_file, symbol)
+                return [(target_file, n) for n in found] if found else None
+            return None
+
+        # -- 2. same-file class-qualified (cheap disambiguation) --------
+        func_node = call.func
+        if isinstance(func_node, ast.Attribute):
+            method_name = func_node.attr
+            receiver = func_node.value
+            class_name: str | None = None
+            if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name):
+                class_name = receiver.func.id           # ClassName().method(...)
+            elif isinstance(receiver, ast.Name) and receiver.id not in ("self", "cls"):
+                class_name = receiver.id                 # ClassName.method(...)
+            elif isinstance(receiver, ast.Name) and receiver.id in ("self", "cls"):
+                class_name = _enclosing_class_name(f, calling_node)
+            if class_name is not None and (class_name, method_name) in class_methods:
+                return [(f, class_methods[(class_name, method_name)])]
+
+        # -- 3. same-file bare name (fallback) --------------------------
+        short = parts[-1]
+        if short and short in same_file_func_index:
+            return [(cf, cn) for cf, cn in same_file_func_index[short]]
+        return None
+
+    def _inspect_body(
+        self,
+        node: ast.AST,
+        f: SourceFile,
+        files_by_rel: dict[str, SourceFile],
+        import_map: dict[str, tuple[SourceFile, str | None]],
+        class_methods: dict[tuple[str, str], ast.AST],
+        same_file_func_index: dict,
+    ) -> tuple[bool, bool]:
         """Return (sink_hit, indirect_gate) considering one hop through any
-        helper function this tool's body plainly calls by name."""
+        helper function this tool's body plainly calls -- import-aware
+        first, then same-file (round-2 N-vote fix; see
+        ``_resolve_call_targets``)."""
         sink_hit = _body_has_mutating_sink(node)
         indirect_gate = False
         for sub in ast.walk(node):
             if not isinstance(sub, ast.Call):
                 continue
-            dotted = _dotted(sub.func)
-            short = dotted.split(".")[-1] if dotted else ""
-            if not short or short not in func_index:
+            candidates = self._resolve_call_targets(
+                sub, f, node, files_by_rel, import_map, class_methods, same_file_func_index
+            )
+            if not candidates:
                 continue
-            for _cf, cnode in func_index[short]:
-                if cnode is node:
-                    continue
-                if not sink_hit and _body_has_mutating_sink(cnode):
-                    sink_hit = True
-                if short in gated_names:
-                    indirect_gate = True
+            candidates = [(cf, cn) for cf, cn in candidates if cn is not node]
+            if not candidates:
+                continue
+            any_sink = any(_body_has_mutating_sink(cn) for _cf, cn in candidates)
+            all_gated = all(_node_has_gate(cf, cn) for cf, cn in candidates)
+            if any_sink and not sink_hit:
+                sink_hit = True
+            # Ambiguous candidates that disagree on gate status withhold
+            # credit for THIS call (over-flag-safe, P0-2 fix) rather than
+            # unioning any single gated candidate's status onto the whole
+            # bare name.
+            if all_gated:
+                indirect_gate = True
         return sink_hit, indirect_gate
 
     def _build_function_index_for_file(self, f: SourceFile) -> dict:

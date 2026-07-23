@@ -1,12 +1,13 @@
-"""Cross-file one-hop fixture: thin MCP tool wrappers that delegate to
-write-group helpers -- the actual gate lives one hop away, in write.py, a
-SEPARATE file. Historical note: this fixture's directory is still named
-`clean_tool_scope` for continuity, but as of the 2026-07-23 same-file-only
-fix (closing the README's named decorator-path follow-up) it is NO LONGER
-expected to scan clean -- see test_cross_file_gate_now_over_flags_by_design
-in test_tool_scope_creep.py. The cross-file hop to write.py is honestly not
-followed anymore (over-flag direction, accepted); see
-clean_tool_scope_same_file_gate/ for the still-covered same-file case."""
+"""Cross-file one-hop fixture: thin MCP tool wrappers that delegate via an
+explicit `from . import write` to write-group helpers -- the actual gate
+lives one hop away, in write.py, a SEPARATE file. 2026-07-23 history: an
+interim same-file-only fix briefly over-flagged this fixture (closing a
+repo-wide gate-index collision an N-vote refuter proved live), then a
+same-day round-2 fix added a bounded, one-hop, IMPORT-AWARE resolver that
+follows this exact explicit-import shape again -- see
+test_cross_file_gate_via_explicit_import_stays_quiet in
+test_tool_scope_creep.py for the full history. This fixture is expected to
+scan clean."""
 from __future__ import annotations
 
 from fastmcp import FastMCP
