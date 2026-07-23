@@ -14,6 +14,10 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pyyaml>=6"]
+# Optional: enables precise self-signed-certificate detection for the
+# tracked-secret-file test-cert demotion (secret_handling.py). Never
+# required -- when absent, that demotion fails closed (stays flagged).
+certs = ["cryptography>=41"]
 
 [project.scripts]
 mcp-scan = "mcp_scanner.cli:main"
