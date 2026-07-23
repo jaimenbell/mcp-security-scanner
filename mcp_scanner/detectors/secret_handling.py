@@ -118,20 +118,56 @@ def _is_known_placeholder_secret(value: str) -> bool:
     return value in _KNOWN_PLACEHOLDER_SECRETS
 
 
+def _private_key_matches_cert(key_path, cert_path) -> bool:
+    """True only when the PEM private key at ``key_path`` cryptographically
+    matches the public key embedded in the cert at ``cert_path`` (their
+    SubjectPublicKeyInfo DER encodings are byte-identical). Directory
+    co-location alone (same folder, both named cert.pem/key.pem by
+    convention) is NOT proof they're a real pair -- an unrelated real
+    production key could coincidentally sit beside an unrelated self-signed
+    test cert. Requires the optional `cryptography` package; any
+    ImportError, parse failure, or mismatch returns False (fails closed)."""
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        return False
+    try:
+        private_key = serialization.load_pem_private_key(
+            key_path.read_bytes(), password=None
+        )
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        priv_pub = private_key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        cert_pub = cert.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return priv_pub == cert_pub
+    except Exception:
+        return False
+
+
 def _sibling_self_signed_cert(rel: str, root) -> bool:
     """Does the same directory as ``rel`` contain a sibling .pem/.crt/.cer
-    file that is itself a provable self-signed cert? Used to extend
+    file that is itself a provable self-signed cert, AND does the key at
+    ``rel`` cryptographically match that cert's public key? Used to extend
     demotion to a cert's paired PRIVATE KEY file (key.pem next to cert.pem)
     -- the key itself carries no issuer/subject to check, but a throwaway
     keypair generated solely for a self-signed local test cert is the same
-    low-risk shape as the cert it belongs to."""
+    low-risk shape as the cert it belongs to. Directory co-location alone
+    is deliberately NOT sufficient -- see ``_private_key_matches_cert``."""
     try:
-        d = (root / rel).parent
+        key_path = root / rel
+        d = key_path.parent
         if not d.is_dir():
             return False
         for sib in d.iterdir():
             if sib.suffix.lower() in _CERT_SUFFIXES and _is_self_signed_test_cert(sib):
-                return True
+                if _private_key_matches_cert(key_path, sib):
+                    return True
     except OSError:
         return False
     return False
