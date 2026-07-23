@@ -64,3 +64,31 @@ def test_lowlevel_sdk_get_status_branch_stays_quiet(fixtures_dir):
     result = scan_repo(str(fixtures_dir / "vuln_secret_leak_lowlevel"), [SecretLeakResponseDetector()])
     hits = [f for f in result.findings if "get_status" in f.detail]
     assert hits == []
+
+
+def test_lowlevel_sdk_ambiguous_call_tool_file_never_guessed(tmp_path):
+    """Two @server.call_tool() handlers in one file (genuinely ambiguous) --
+    even a blatant os.environ leak inside must never be attributed, never
+    guessed. Mirrors tool_registry's own never-guess-a-root discipline for
+    reachability."""
+    (tmp_path / "server.py").write_text(
+        "from mcp import types\n"
+        "from mcp.server import Server\n"
+        "import os\n"
+        "server_a = Server('a')\n"
+        "server_b = Server('b')\n"
+        "\n"
+        "@server_a.call_tool()\n"
+        "async def call_tool_a(name, arguments):\n"
+        "    return {'env': os.environ}\n"
+        "\n"
+        "@server_b.call_tool()\n"
+        "async def call_tool_b(name, arguments):\n"
+        "    return {'env': os.environ}\n",
+        encoding="utf-8",
+    )
+    result = scan_repo(str(tmp_path), [SecretLeakResponseDetector()])
+    assert result.findings == [], (
+        f"an ambiguous (2+ call_tool handlers) file must be skipped entirely, "
+        f"got: {result.findings}"
+    )

@@ -98,14 +98,14 @@ This is the acceptance test (`tests/test_self_audit.py`): it must (a) flag the m
 ## Tests
 
 ```bash
-python -m pytest -q     # 253 tests (246 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix (incl. the cli-only/uncalled decidable-reachability grades + the low-level MCP SDK Server()/list_tools/call_tool discovery shape, per-module-scoped and import-provenance-gated so a repo with more than one dispatcher, or a same-named non-MCP class, can't claim a bogus root, and an un-rooted low-level tool -- split declaration/dispatch modules, or a genuinely ambiguous multi-dispatcher file -- withholds CLI_ONLY/UNCALLED in favor of UNKNOWN the same way unresolvable dynamic dispatch does) + detector 5 (tool-scope-creep) and detector 6 (secret-leak-via-tool-response) low-level-SDK dispatch-branch attribution (2026-07-23: `tool_registry.dispatch_segments`, shared by both detectors) + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer + the CI README count-verification gate's own unit tests
+python -m pytest -q     # 255 tests (248 passing, 7 self-audit skip without the env var below): per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix (incl. the cli-only/uncalled decidable-reachability grades + the low-level MCP SDK Server()/list_tools/call_tool discovery shape, per-module-scoped and import-provenance-gated so a repo with more than one dispatcher, or a same-named non-MCP class, can't claim a bogus root, and an un-rooted low-level tool -- split declaration/dispatch modules, or a genuinely ambiguous multi-dispatcher file -- withholds CLI_ONLY/UNCALLED in favor of UNKNOWN the same way unresolvable dynamic dispatch does) + detector 5 (tool-scope-creep) and detector 6 (secret-leak-via-tool-response) low-level-SDK dispatch-branch attribution (2026-07-23: `tool_registry.dispatch_segments`, shared by both detectors) + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof + client-report renderer + the CI README count-verification gate's own unit tests
 ```
 
 CI (`.github/workflows/ci.yml`) runs this suite on every push/PR and fails the
 build if this claimed count drifts from what the suite actually reports --
 see `scripts/check_readme_counts.py`.
 
-The self-audit tests (7 of the 253) require `MCP_SCANNER_FLEET_ROOT` to be set
+The self-audit tests (7 of the 255) require `MCP_SCANNER_FLEET_ROOT` to be set
 and pointed at real MCP server repos to scan; they skip cleanly if it's
 unset (e.g. in a fresh clone or CI on another machine). See
 [ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.

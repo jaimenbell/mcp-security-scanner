@@ -59,3 +59,22 @@ def test_lowlevel_sdk_shared_pre_dispatch_gate_quiets_all_branches(fixtures_dir)
     result = scan_repo(str(fixtures_dir / "clean_tool_scope_lowlevel"), [ToolScopeCreepDetector()])
     hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
     assert hits == [], f"shared pre-dispatch gate must quiet every branch, got: {[(f.title, f.file, f.line) for f in hits]}"
+
+
+def test_lowlevel_sdk_ambiguous_file_skipped_but_valid_sibling_still_flagged(fixtures_dir):
+    """Reuses tests/fixtures/lowlevel_mixed_ambiguous (built for the
+    reachability fix): x_ambiguous.py has TWO @server.call_tool() handlers
+    in one file -- genuinely ambiguous, must be skipped entirely (never
+    guess a root), even though its helper (_run_x) has an ungated os.system
+    sink. y_valid.py in the SAME repo has exactly one call_tool handler with
+    no if/elif dispatch shape at all -- its ungated sink must still be
+    flagged, attributed to the dispatch handler (no per-tool attribution
+    possible without a dispatch chain)."""
+    result = scan_repo(str(fixtures_dir / "lowlevel_mixed_ambiguous"), [ToolScopeCreepDetector()])
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    assert not any("x_ambiguous.py" in f.file for f in hits), (
+        f"ambiguous-dispatcher file must never guess a root, got: {[(f.file, f.title) for f in hits]}"
+    )
+    assert any("y_valid.py" in f.file for f in hits), (
+        f"the unambiguous sibling file's ungated sink must still be flagged, got: {result.findings}"
+    )
