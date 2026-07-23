@@ -15,6 +15,7 @@ import os
 import pytest
 
 from mcp_scanner.cli import FLEET_ROOT_ENV_VAR, get_fleet_root, run_self_audit
+from mcp_scanner.models import Confidence
 from mcp_scanner.scanner import scan_repo
 
 CLEAN_SERVERS = [
@@ -68,15 +69,31 @@ def test_mcp_factory_scans_clean_after_codegen_fix():
 @requires_fleet
 @pytest.mark.parametrize("name", CLEAN_SERVERS)
 def test_clean_servers_get_clean_bill(name):
+    # Round-3 N-vote note: the ONE LAW (secret_handling.py) means a fake-
+    # marker match or a demoted test cert now DEMOTES to LOW confidence
+    # rather than fully suppressing -- so a fleet repo whose OWN test
+    # fixtures happen to embed an obviously-fake-named secret (github-mcp's
+    # "Bearer github_pat_fake_test_token_1234", discord-mcp's
+    # `TEST_TOKEN = "fake-test-token-do-not-use"`) now correctly shows a
+    # LOW-confidence P1 finding instead of zero findings. That is honest,
+    # intentional, and NOT a regression to re-suppress -- the model's own
+    # `clean_bill` property is severity-only by design (see models.py) and
+    # is deliberately left alone. This test's bar is calibrated one notch
+    # more precisely: "no HIGH/MEDIUM-confidence P0/P1" -- a genuinely
+    # clean server in the strict sense, tolerating the fleet's own known,
+    # understood, low-confidence test-fixture noise.
     fleet_root = get_fleet_root()
     target = fleet_root / name
     if not target.exists():
         pytest.skip(f"{name} not present")
     r = scan_repo(str(target))
-    highs = [f for f in r.findings if f.severity.value in ("P0", "P1")]
-    assert r.clean_bill, (
-        f"{name} should get a clean bill, got P0/P1: "
-        + "; ".join(f"{f.severity.value} {f.vuln_class} {f.file}:{f.line}" for f in highs)
+    highs = [
+        f for f in r.findings
+        if f.severity.value in ("P0", "P1") and f.confidence != Confidence.LOW
+    ]
+    assert not highs, (
+        f"{name} should get a clean bill (no HIGH/MEDIUM-confidence P0/P1), got: "
+        + "; ".join(f"{f.severity.value}/{f.confidence.value} {f.vuln_class} {f.file}:{f.line}" for f in highs)
     )
 
 
