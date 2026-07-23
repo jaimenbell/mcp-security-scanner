@@ -12,6 +12,7 @@ this operates on the tracked working tree and flags what a client can see today.
 from __future__ import annotations
 
 import ast
+import functools
 import re
 
 from ..models import Finding, Severity, Confidence
@@ -70,22 +71,129 @@ def _is_test_fixture_path(rel: str) -> bool:
     return bool(_TEST_PATH_MARKER.search(rel))
 
 
+def _try_import_cryptography():
+    """Re-attempted on every call (cheap) -- deliberately NOT itself
+    memoized, so a test that simulates ``cryptography`` being unavailable
+    (monkeypatching ``__import__``) always genuinely re-checks rather than
+    ever reusing a stale cached-available result from an earlier test in
+    the same process. Returns the ``cryptography.x509`` module, or
+    ``None``."""
+    try:
+        from cryptography import x509
+        return x509
+    except ImportError:
+        return None
+
+
+@functools.lru_cache(maxsize=None)
+def _parse_x509_cert_bytes_cached(x509_mod, data: bytes):
+    """The actual (expensive) parse, memoized on the exact bytes -- P3
+    perf fix: re-parsing the same cert file repeatedly measured 4.65s on a
+    200-cert-pair directory. Only ever called when ``x509_mod`` is already
+    known non-None (see ``_parse_x509_cert``), so this cache can never
+    mask a genuinely-unavailable-cryptography check."""
+    try:
+        return x509_mod.load_pem_x509_certificate(data)
+    except Exception:
+        return None
+
+
+def _parse_x509_cert(path):
+    """Parsed X.509 certificate for ``path``, or ``None`` on ImportError,
+    a missing/unreadable file, or any parse error. The ``cryptography``
+    availability check happens OUTSIDE the memoized parse step on every
+    call -- see ``_try_import_cryptography`` -- so caching a successful
+    parse from one test can never leak into a different test that's
+    deliberately simulating the package's absence."""
+    x509_mod = _try_import_cryptography()
+    if x509_mod is None:
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return _parse_x509_cert_bytes_cached(x509_mod, data)
+
+
 def _is_self_signed_test_cert(path) -> bool:
     """True only when ``path`` parses as an X.509 certificate whose issuer
     equals its subject (the definition of self-signed). Requires the
     optional ``cryptography`` package; on ImportError, a missing/unreadable
     file, or any parse error, this returns False -- unknown always stays on
     the flagged side (over-flag-safe), never demoted on a guess."""
-    try:
-        from cryptography import x509
-    except ImportError:
+    cert = _parse_x509_cert(path)
+    if cert is None:
         return False
+    return cert.issuer == cert.subject
+
+
+# --- Round-2 N-vote P0-4 fix: test-SHAPED identity, not just self-signed --
+# issuer==subject alone is just "self-signed" -- true of a real internal-CA
+# PRODUCTION root too -- and a test-fixture PATH is trivially true for an
+# integration suite that embeds real staging/prod TLS material under
+# tests/. Live repro: a self-signed cert with CN=payments-api.mycompany-
+# prod.internal, ~10-year validity, sitting under tests/, demoted to
+# invisible under the old two-check rule. Demotion now ALSO requires the
+# cert's own content to look test-shaped.
+_TEST_IDENTITY_MARKERS = re.compile(
+    r"localhost|127\.0\.0\.1|::1|\.local$|\.test$|\.example$|\.invalid$|"
+    r"\btest\b|\bdemo\b|\bexample\b|\bdummy\b|\bfixture\b|\bmock\b",
+    re.IGNORECASE,
+)
+_MAX_TEST_CERT_VALIDITY_DAYS = 90
+_MIN_PROD_RSA_KEY_BITS = 2048
+
+
+def _cert_identity_names(cert) -> list[str]:
+    names: list[str] = []
     try:
-        data = path.read_bytes()
-        cert = x509.load_pem_x509_certificate(data)
-        return cert.issuer == cert.subject
+        from cryptography.x509.oid import NameOID
+        cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        if cn_attrs:
+            names.append(str(cn_attrs[0].value))
     except Exception:
+        pass
+    try:
+        from cryptography import x509 as x509_mod
+        san_ext = cert.extensions.get_extension_for_class(x509_mod.SubjectAlternativeName)
+        names.extend(str(n) for n in san_ext.value.get_values_for_type(x509_mod.DNSName))
+    except Exception:
+        pass
+    return names
+
+
+def _cert_has_test_shaped_identity(path) -> bool:
+    """True when a self-signed cert at ``path`` ALSO looks test-shaped by
+    content: its CN/SAN matches a localhost/test/example/demo/dummy/mock/
+    fixture pattern, OR its validity window is short (<= 90 days -- real
+    internal-CA production roots are typically issued for a year or
+    more), OR its RSA key is below common production norms (< 2048 bits).
+    Any ONE of these alone is a soft signal, not proof, but combined with
+    the caller's separate issuer==subject + test-fixture-path checks this
+    is what stops a self-signed, long-validity, prod-FQDN-shaped internal-
+    CA root from demoting purely for living under a tests/ directory.
+    Fails closed (False) on ImportError/parse error, same convention as
+    every other cert check in this module."""
+    cert = _parse_x509_cert(path)
+    if cert is None:
         return False
+    if any(_TEST_IDENTITY_MARKERS.search(n) for n in _cert_identity_names(cert)):
+        return True
+    try:
+        not_before = getattr(cert, "not_valid_before_utc", None) or cert.not_valid_before
+        not_after = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after
+        if (not_after - not_before).days <= _MAX_TEST_CERT_VALIDITY_DAYS:
+            return True
+    except Exception:
+        pass
+    try:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        pub = cert.public_key()
+        if isinstance(pub, rsa.RSAPublicKey) and pub.key_size < _MIN_PROD_RSA_KEY_BITS:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _looks_like_private_key_pem(path) -> bool:
@@ -152,20 +260,26 @@ def _private_key_matches_cert(key_path, cert_path) -> bool:
 
 def _sibling_self_signed_cert(rel: str, root) -> bool:
     """Does the same directory as ``rel`` contain a sibling .pem/.crt/.cer
-    file that is itself a provable self-signed cert, AND does the key at
-    ``rel`` cryptographically match that cert's public key? Used to extend
-    demotion to a cert's paired PRIVATE KEY file (key.pem next to cert.pem)
-    -- the key itself carries no issuer/subject to check, but a throwaway
-    keypair generated solely for a self-signed local test cert is the same
-    low-risk shape as the cert it belongs to. Directory co-location alone
-    is deliberately NOT sufficient -- see ``_private_key_matches_cert``."""
+    file that is itself a provable self-signed cert AND test-shaped by
+    content (round-2 N-vote P0-4, same requirement as the direct cert
+    path), AND does the key at ``rel`` cryptographically match that cert's
+    public key? Used to extend demotion to a cert's paired PRIVATE KEY file
+    (key.pem next to cert.pem) -- the key itself carries no issuer/subject
+    to check, but a throwaway keypair generated solely for a self-signed
+    local test cert is the same low-risk shape as the cert it belongs to.
+    Directory co-location alone is deliberately NOT sufficient -- see
+    ``_private_key_matches_cert``."""
     try:
         key_path = root / rel
         d = key_path.parent
         if not d.is_dir():
             return False
         for sib in d.iterdir():
-            if sib.suffix.lower() in _CERT_SUFFIXES and _is_self_signed_test_cert(sib):
+            if (
+                sib.suffix.lower() in _CERT_SUFFIXES
+                and _is_self_signed_test_cert(sib)
+                and _cert_has_test_shaped_identity(sib)
+            ):
                 if _private_key_matches_cert(key_path, sib):
                     return True
     except OSError:
@@ -361,12 +475,15 @@ class SecretHandlingDetector(Detector):
     def _is_demoted_test_cert(rel: str, root) -> bool:
         """Called only after a tracked-secret-file pattern already matched
         AND the path is a test-fixture path. Returns True when the file is
-        provably a self-signed cert, or a private key paired with one in
-        the same directory -- never on extension/path alone."""
+        provably a self-signed cert that ALSO looks test-shaped by content
+        (round-2 N-vote P0-4: self-signed + test-path alone discriminates
+        nothing real -- see ``_cert_has_test_shaped_identity``), or a
+        private key paired with one in the same directory -- never on
+        extension/path alone."""
         low = rel.lower()
         if low.endswith((".pem", ".crt", ".cer")):
             abs_path = root / rel
-            if _is_self_signed_test_cert(abs_path):
+            if _is_self_signed_test_cert(abs_path) and _cert_has_test_shaped_identity(abs_path):
                 return True
             # Same extension, but not parseable as a cert -- may be the
             # paired PRIVATE KEY file (real-world convention: both cert and
