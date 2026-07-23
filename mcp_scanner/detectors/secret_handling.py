@@ -381,15 +381,50 @@ class SecretHandlingDetector(Detector):
 
     def _scan_literals(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
-        # value-shape matches on raw text (catches non-python too)
+        # value-shape matches on raw text (catches non-python too).
+        #
+        # Round-2 N-vote P0-3 fix: this scanner's stated use case is
+        # ADVERSARIAL/third-party scanning, not a cooperative repo owner --
+        # `# pragma: allowlist secret` is a TARGET-authored, attacker-
+        # controllable signal (a malicious external repo could otherwise
+        # suppress its entire secret class with one comment per line) and
+        # must NEVER fully suppress a finding on its own; it may only
+        # demote confidence and tag the finding as author-suppressed so a
+        # report still surfaces it. The CURATED placeholder list is OUR
+        # OWN judgment (a short, reviewed, exact-match set of famous public
+        # SDK-doc placeholders) and may still fully suppress.
+        #
+        # Also match-scoped, not line-scoped: `.finditer()` (not
+        # `.search()`) so two DIFFERENT secret-shaped values on the same
+        # line are each judged independently -- a real secret co-located
+        # with a placeholder, or on a pragma-commented line, must not be
+        # masked by the OTHER value's demotion.
         for i, line in enumerate(f.lines, start=1):
-            if _SUPPRESS_COMMENT.search(line):
-                continue
+            has_suppress_comment = bool(_SUPPRESS_COMMENT.search(line))
             for pat, what in _SECRET_VALUE_PATTERNS:
-                m = pat.search(line)
-                if m and _is_known_placeholder_secret(m.group(0)):
-                    continue
-                if m:
+                for m in pat.finditer(line):
+                    value = m.group(0)
+                    if _is_known_placeholder_secret(value):
+                        continue
+                    if has_suppress_comment:
+                        out.append(Finding(
+                            vuln_class="hardcoded-secret",
+                            title=f"Hardcoded {what} in source (author-suppressed)",
+                            severity=Severity.P1, confidence=Confidence.LOW,
+                            file=f.rel, line=i,
+                            detail=(
+                                f"A {what} appears as a literal in tracked source. "
+                                "The line carries an author suppress-convention comment "
+                                "(e.g. `# pragma: allowlist secret`) -- in adversarial/"
+                                "third-party scanning this signal is target-controlled "
+                                "and cannot be trusted to fully silence a finding, so "
+                                "confidence is demoted rather than the finding dropped."
+                            ),
+                            remediation="Verify this is genuinely a placeholder, not a "
+                                        "real credential; if real, rotate immediately.",
+                            snippet="<redacted secret line>",
+                        ))
+                        continue
                     out.append(Finding(
                         vuln_class="hardcoded-secret",
                         title=f"Hardcoded {what} in source",
