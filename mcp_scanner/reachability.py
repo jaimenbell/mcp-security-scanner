@@ -222,13 +222,28 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
     registry = extract_tool_registry(ctx)
     tool_nodes = [r.node for r in registry if r.node is not None]
     has_tools = bool(registry)
+    # 2026-07-23 round-3 N-vote fix (Opus final-verify BLOCKED finding): a
+    # low-level-SDK registration with node=None (tool_registry.py couldn't
+    # unambiguously attribute a same-file dispatcher -- split declaration/
+    # dispatch modules, or a genuinely ambiguous multi-dispatcher file) means
+    # a REAL tool exists whose call path this pass cannot walk. has_tools/
+    # have_py_handlers are computed repo-wide, so as soon as ANY OTHER
+    # registration in the same repo has a valid root, the CLI_ONLY/UNCALLED
+    # branch below would confidently grade -- and possibly DOWNGRADE -- a
+    # finding that is, in truth, reachable only through the un-rooted
+    # dispatcher this pass never walked. Same treatment as
+    # ``dynamic_dispatch_present``: soundness over decidability.
+    unrooted_lowlevel = any(
+        r.node is None and r.source == "py-lowlevel-sdk" for r in registry
+    )
 
     cg = CallGraph(ctx)
     reachable_ids = cg.reachable_from(tool_nodes) if tool_nodes else set()
 
     graded: list[Finding] = []
     for f in result.findings:
-        label, evidence = _grade_one(f, ctx, cg, reachable_ids, has_tools, bool(tool_nodes))
+        label, evidence = _grade_one(f, ctx, cg, reachable_ids, has_tools,
+                                      bool(tool_nodes), unrooted_lowlevel)
         conf = f.confidence
         if label is Reachability.REACHABLE:
             conf = _RAISE[f.confidence]
@@ -241,7 +256,7 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
 
 def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
                reachable_ids: set[int], has_tools: bool,
-               have_py_handlers: bool) -> tuple[Reachability, str]:
+               have_py_handlers: bool, unrooted_lowlevel: bool = False) -> tuple[Reachability, str]:
     if not has_tools:
         return Reachability.UNKNOWN, ""
     src = None
@@ -269,8 +284,11 @@ def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
     # Not reachable from any registered tool. Decide the finer-grained
     # question -- "does anything at all call this?" -- unless the repo
     # contains dynamic dispatch that could hide a caller we can't see
-    # (soundness over decidability: 2026-07-22, see Reachability docstring).
-    if cg.dynamic_dispatch_present:
+    # (soundness over decidability: 2026-07-22, see Reachability docstring),
+    # or an un-rooted low-level-SDK dispatcher exists in this same repo that
+    # this pass never walked (soundness over decidability: 2026-07-23 round-3
+    # N-vote fix -- see the ``unrooted_lowlevel`` comment in grade_result).
+    if cg.dynamic_dispatch_present or unrooted_lowlevel:
         return Reachability.UNKNOWN, ""
     callers = cg.callers_outside(enclosing)
     if callers:
