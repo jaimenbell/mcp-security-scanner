@@ -277,54 +277,145 @@ def _string_eq_literal(test: ast.AST) -> str | None:
     return None
 
 
-def dispatch_segments(handler: ast.AST) -> list[tuple[str | None, list[ast.stmt]]]:
+def _eq_discriminant(test: ast.AST) -> ast.AST | None:
+    """The non-literal side of an ``<expr> == "literal"`` compare (either
+    operand order) -- the expression a dispatch chain is actually
+    discriminating on. ``None`` if ``test`` isn't that exact shape (mirrors
+    ``_string_eq_literal``'s gate, just returning the other side)."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)):
+        return None
+    left, right = test.left, test.comparators[0]
+    if isinstance(right, ast.Constant) and isinstance(right.value, str):
+        return left
+    if isinstance(left, ast.Constant) and isinstance(left.value, str):
+        return right
+    return None
+
+
+def _first_param_name(handler: ast.AST) -> str | None:
+    """The handler's first non-``self``/``cls`` positional parameter name
+    (``name`` in ``async def call_tool(name, arguments)``) -- the
+    conventional MCP low-level SDK dispatch discriminant, used to pick the
+    RIGHT if/elif chain when a handler has more than one top-level
+    string-equality ``if`` (2026-07-23 P1 N-vote fix, refuter A's P3: the
+    previous first-if-found walk could root on an unrelated earlier ``if``
+    that happened to compare some other variable to a string literal)."""
+    args = getattr(handler, "args", None)
+    if args is None:
+        return None
+    for a in list(getattr(args, "posonlyargs", [])) + list(args.args):
+        if a.arg in ("self", "cls"):
+            continue
+        return a.arg
+    return None
+
+
+def _find_dispatch_chain(handler: ast.AST) -> tuple[int | None, ast.If | None, str | None]:
+    """Locate the handler's dispatch if/elif chain: ``(index_in_body,
+    if_node, discriminant_dump)`` or ``(None, None, None)`` if no top-level
+    ``if <x> == "literal":`` exists at all.
+
+    Among every top-level ``if`` whose test is a plain string-equality
+    compare, prefer the one whose discriminant is the handler's first
+    parameter (the conventional ``call_tool(name, arguments)`` shape); if
+    none matches, fall back to the first such ``if`` found (previous
+    behavior, still disclosed as a heuristic, not proof)."""
+    body = list(getattr(handler, "body", None) or [])
+    candidates: list[tuple[int, ast.If, ast.AST]] = []
+    for i, stmt in enumerate(body):
+        if isinstance(stmt, ast.If):
+            disc = _eq_discriminant(stmt.test)
+            if disc is not None:
+                candidates.append((i, stmt, disc))
+    if not candidates:
+        return None, None, None
+
+    first_param = _first_param_name(handler)
+    if first_param:
+        for i, stmt, disc in candidates:
+            if isinstance(disc, ast.Name) and disc.id == first_param:
+                return i, stmt, ast.dump(disc)
+
+    i, stmt, disc = candidates[0]
+    return i, stmt, ast.dump(disc)
+
+
+def dispatch_segments(handler: ast.AST) -> list[tuple[str | None, list[ast.stmt], bool]]:
     """Split a low-level SDK ``call_tool`` handler's body into
-    ``(tool_name, stmts)`` segments -- the per-tool "effective body" that
-    ``tool_scope_creep.py`` (mutating-sink/gate inspection) and
+    ``(tool_name, stmts, shared)`` segments -- the per-tool "effective body"
+    that ``tool_scope_creep.py`` (mutating-sink/gate inspection) and
     ``secret_leak_response.py`` (leak-shaped-return inspection) each need,
     without either re-deriving its own dispatch-branch walk.
 
-    ``tool_name`` is the literal from an unambiguous top-level ``if <x> ==
-    "name":`` / ``elif <x> == "name":`` branch in the handler's OWN body
-    (not nested inside a ``try``/``for``/etc.). ``tool_name`` is ``None``
-    for a segment that cannot be attributed to one specific tool -- a final
-    ``else``, a branch whose test isn't a plain string-equality compare
-    (``in (...)``, multiple names, ...), or code outside the if/elif chain
-    entirely (import-time validation, a shared pre-dispatch auth check,
-    an unrecognized final fallback). Consumers must attribute ``None``
-    segments to the dispatch handler itself, never guess a specific tool --
-    same never-guess-a-root philosophy as ``_extract_low_level_sdk``.
+    ``tool_name`` is the literal from an unambiguous ``if <x> == "name":`` /
+    ``elif <x> == "name":`` link in the handler's dispatch chain, found via
+    ``_find_dispatch_chain``. Every link in the chain must compare the exact
+    SAME discriminant expression (structural equality via ``ast.dump``) --
+    2026-07-23 P1 N-vote fix: the previous walk accepted ANY string-equality
+    test at each link regardless of what it compared, so
+    ``if name == "safe_tool": ... elif arguments.get("mode") ==
+    "delete_everything": os.remove(...)`` fabricated a root for a tool named
+    ``'delete_everything'`` that was never registered. Once one link's
+    discriminant mismatches, that link AND every link after it in the chain
+    tag ``None`` (chain integrity broken, never partially trusted).
+
+    ``tool_name`` is ``None`` for a segment that cannot be attributed to one
+    specific tool -- a final ``else``, a branch whose test isn't a plain
+    string-equality compare (``in (...)``, multiple names, ...), a
+    discriminant-mismatched link (see above), or code outside the if/elif
+    chain entirely. Consumers must attribute ``None`` segments to the
+    dispatch handler itself, never guess a specific tool -- same
+    never-guess-a-root philosophy as ``_extract_low_level_sdk``.
+
+    ``shared`` is ``True`` only for the segment of statements BEFORE the
+    dispatch chain in the handler's top-level body (a shared pre-dispatch
+    auth/validation check that runs unconditionally for every branch, e.g.
+    ``if not check_permission(name): raise ...`` above the if/elif) --
+    2026-07-23 P0-1 N-vote fix companion: callers need this to know which
+    ``None`` segments legitimately gate every OTHER segment too, versus an
+    ambiguous/final-else branch or trailing code, which must gate only
+    itself. Every branch segment and any trailing (post-chain) leftover are
+    ``shared=False``.
 
     When the handler's top level has no such if/elif dispatch shape at all
     (a dict-keyed dispatch table, a ``match``/``case`` statement, or any
     other shape this walk doesn't recognize), the single segment
-    ``(None, handler.body)`` is returned -- the honest whole-handler
+    ``(None, handler.body, False)`` is returned -- the honest whole-handler
     fallback, disclosed rather than a wrong per-tool guess.
     """
     body = list(getattr(handler, "body", None) or [])
-    dispatch_if = None
-    for stmt in body:
-        if isinstance(stmt, ast.If) and _string_eq_literal(stmt.test) is not None:
-            dispatch_if = stmt
-            break
+    idx, dispatch_if, discriminant_dump = _find_dispatch_chain(handler)
     if dispatch_if is None:
-        return [(None, body)]
+        return [(None, body, False)]
 
-    segments: list[tuple[str | None, list[ast.stmt]]] = []
+    chain_segments: list[tuple[str | None, list[ast.stmt], bool]] = []
     cur: ast.If = dispatch_if
+    chain_broken = False
     while True:
-        segments.append((_string_eq_literal(cur.test), cur.body))
+        disc = _eq_discriminant(cur.test)
+        lit = _string_eq_literal(cur.test)
+        if not chain_broken and disc is not None and ast.dump(disc) == discriminant_dump:
+            name = lit
+        else:
+            name = None
+            chain_broken = True
+        chain_segments.append((name, cur.body, False))
         if len(cur.orelse) == 1 and isinstance(cur.orelse[0], ast.If):
             cur = cur.orelse[0]
             continue
         if cur.orelse:
-            segments.append((None, cur.orelse))
+            chain_segments.append((None, cur.orelse, False))
         break
 
-    leftover = [s for s in body if s is not dispatch_if]
-    if leftover:
-        segments.append((None, leftover))
-    return segments
+    result: list[tuple[str | None, list[ast.stmt], bool]] = []
+    pre = body[:idx]
+    if pre:
+        result.append((None, pre, True))
+    result.extend(chain_segments)
+    post = body[idx + 1:]
+    if post:
+        result.append((None, post, False))
+    return result
 
 
 def _extract_low_level_sdk(ctx: RepoContext) -> list[ToolRegistration]:

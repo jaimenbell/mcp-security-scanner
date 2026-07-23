@@ -277,29 +277,47 @@ class ToolScopeCreepDetector(Detector):
                     snippet=f.line_at(node.lineno),
                 ))
             if _file_imports_mcp(f):
-                findings.extend(self._scan_low_level_sdk(f, func_index, gated_names))
+                findings.extend(self._scan_low_level_sdk(f))
         findings.extend(self._scan_js(ctx))
         return findings
 
     # --- low-level MCP SDK: call_tool dispatch handler --------------------
-    def _scan_low_level_sdk(self, f: SourceFile, func_index: dict, gated_names: set) -> list[Finding]:
+    def _scan_low_level_sdk(self, f: SourceFile) -> list[Finding]:
         handlers = _decorated_in_file(f, _is_call_tool_decorator)
         if len(handlers) != 1:
             # Zero, or more than one, call_tool handler in this file --
             # never guess a root (mirrors _extract_low_level_sdk).
             return []
         handler = handlers[0]
+        # Same-file-only (see _build_function_index_for_file docstring) --
+        # distinct from, and does not affect, the decorator path's own
+        # repo-wide func_index/gated_names built in run().
+        file_func_index = self._build_function_index_for_file(f)
+        file_gated_names = self._build_gate_index(file_func_index)
         module_gate = _module_level_env_gate(f)
-        # Deliberately coarse (disclosed): a gate hint anywhere in the
-        # handler's own decorator list or full body text -- covers a shared
-        # pre-dispatch permission check that runs before every branch --
-        # gates every branch in this handler, not just the segment it's
-        # textually in.
-        shared_gate = module_gate or _node_has_gate(f, handler)
+        decorator_src = " ".join(_unparse(d) for d in getattr(handler, "decorator_list", []))
+        decorator_gate = bool(_GATE_HINT.search(decorator_src))
+
+        segments = dispatch_segments(handler)
+        # 2026-07-23 P0-1 N-vote fix: gate detection is now PER-BRANCH. A
+        # gate hint anywhere in the handler's FULL body text used to gate
+        # every branch (a hint in one branch silenced an ungated sibling --
+        # the refuter's live repro: an `is_authorized` check in a read_file
+        # branch silenced delete_file's own ungated os.remove() in the same
+        # handler). Only a genuinely shared segment (statements BEFORE the
+        # if/elif dispatch chain, ``shared=True`` from ``dispatch_segments``
+        # -- e.g. a `if not check_permission(name): raise` guard that runs
+        # unconditionally for every branch) legitimately gates every OTHER
+        # segment too; the handler's own decorator and any module-level gate
+        # still apply repo/file-wide as before.
+        shared_prefix_gate = any(
+            shared and self._stmts_have_gate(f, stmts) for _, stmts, shared in segments
+        )
+        shared_gate = module_gate or decorator_gate or shared_prefix_gate
 
         out: list[Finding] = []
-        for tool_name, stmts in dispatch_segments(handler):
-            sink_hit, indirect_gate = self._inspect_stmts(stmts, func_index, gated_names)
+        for tool_name, stmts, _shared in segments:
+            sink_hit, indirect_gate = self._inspect_stmts(stmts, file_func_index, file_gated_names)
             by_name = bool(tool_name) and bool(_MUTATING_VERB.match(tool_name))
             is_mutating = by_name or sink_hit
             if not is_mutating:
@@ -469,6 +487,26 @@ class ToolScopeCreepDetector(Detector):
             for node in ast.walk(f.tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     idx.setdefault(node.name, []).append((f, node))
+        return idx
+
+    def _build_function_index_for_file(self, f: SourceFile) -> dict:
+        """Same shape as ``_build_function_index``, scoped to ONE file.
+        2026-07-23 (self-caught during the P0-2 N-vote fix pass): the
+        low-level SDK path's one-hop helper/gate resolution shares this
+        detector's pre-existing repo-wide-by-short-name ``func_index``/
+        ``gated_names`` mechanism -- the same class of bug the N-vote
+        refuter proved against the (separate, out-of-scope) decorator path.
+        Since the low-level path is new code from this same session, it is
+        scoped same-file-only here rather than shipped with a known-live
+        cross-file collision risk. Does NOT change the pre-existing
+        decorator-registered path's own repo-wide behavior (see this
+        detector's docstring for that named follow-up)."""
+        idx: dict[str, list[tuple[SourceFile, ast.AST]]] = {}
+        if f.tree is None:
+            return idx
+        for node in ast.walk(f.tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                idx.setdefault(node.name, []).append((f, node))
         return idx
 
     def _build_gate_index(self, func_index: dict) -> set:

@@ -198,30 +198,36 @@ def _stmts_direct_returns(stmts: list[ast.stmt]):
             yield from _direct_returns(stmt)
 
 
-def _build_function_index(ctx: RepoContext) -> dict:
-    """name -> [(SourceFile, FunctionDef/AsyncFunctionDef), ...] across the
-    whole repo -- same shape as ``tool_scope_creep.py``'s own index, used
-    here for the one-hop helper-delegation lookup a low-level SDK dispatch
-    branch needs (``return _leaky_helper(...)`` -- the leak lives in
-    ``_leaky_helper``'s own return, not in the branch's return expression)."""
-    idx: dict[str, list[tuple[SourceFile, ast.AST]]] = {}
-    for f in ctx.files:
-        if f.tree is None:
-            continue
-        for node in ast.walk(f.tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                idx.setdefault(node.name, []).append((f, node))
+def _file_function_index(f: SourceFile) -> dict[str, list[ast.AST]]:
+    """name -> [FunctionDef/AsyncFunctionDef, ...] within this ONE file
+    only. 2026-07-23 P0-2 N-vote fix: the previous cut built this repo-wide
+    by short name, so an unrelated, never-imported same-named helper
+    elsewhere in the repo (e.g. a debug script's own ``_format`` that dumps
+    ``os.environ``) could be resolved as the one-hop target for a call in a
+    completely different, clean file -- fabricating a P0 leak finding
+    against a tool that never touches it. Same-file-only matches the
+    same-file-only ``Tool()``<->dispatcher correlation precedent already
+    shipped in ``_extract_low_level_sdk`` -- a helper in another file that
+    isn't provably reachable this way is an honest miss, disclosed, not a
+    guessed hit."""
+    idx: dict[str, list[ast.AST]] = {}
+    if f.tree is None:
+        return idx
+    for node in ast.walk(f.tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            idx.setdefault(node.name, []).append(node)
     return idx
 
 
 def _one_hop_dispatched_funcs(
-    stmts: list[ast.stmt], func_index: dict, exclude: ast.AST
-) -> list[tuple[SourceFile, ast.AST]]:
+    stmts: list[ast.stmt], file_func_index: dict[str, list[ast.AST]], exclude: ast.AST
+) -> list[ast.AST]:
     """Every helper function this branch/segment plainly calls by name,
-    resolved one hop via ``func_index`` -- no proof the call's return value
-    is literally what gets returned upstream, same over-flag-rather-than-miss
+    resolved one hop via ``file_func_index`` -- SAME FILE ONLY (see
+    ``_file_function_index``). No proof the call's return value is
+    literally what gets returned upstream, same over-flag-rather-than-miss
     convention as ``tool_scope_creep.py``'s one-hop helper resolution."""
-    out: list[tuple[SourceFile, ast.AST]] = []
+    out: list[ast.AST] = []
     seen: set[int] = set()
     for stmt in stmts:
         for sub in ast.walk(stmt):
@@ -229,13 +235,13 @@ def _one_hop_dispatched_funcs(
                 continue
             dotted = _dotted(sub.func)
             short = dotted.split(".")[-1] if dotted else ""
-            if not short or short not in func_index:
+            if not short or short not in file_func_index:
                 continue
-            for cf, cnode in func_index[short]:
+            for cnode in file_func_index[short]:
                 if cnode is exclude or id(cnode) in seen:
                     continue
                 seen.add(id(cnode))
-                out.append((cf, cnode))
+                out.append(cnode)
     return out
 
 
@@ -244,7 +250,6 @@ class SecretLeakResponseDetector(Detector):
 
     def run(self, ctx: RepoContext) -> list[Finding]:
         findings: list[Finding] = []
-        func_index: dict | None = None
         for f in ctx.files:
             if f.tree is None:
                 continue
@@ -258,14 +263,12 @@ class SecretLeakResponseDetector(Detector):
                         continue
                     findings.extend(self._check_return(f, f"Tool '{node.name}'", ret))
             if _file_imports_mcp(f):
-                if func_index is None:
-                    func_index = _build_function_index(ctx)
-                findings.extend(self._scan_low_level_sdk(f, func_index))
+                findings.extend(self._scan_low_level_sdk(f))
         findings.extend(self._scan_js(ctx))
         return findings
 
     # --- low-level MCP SDK: call_tool dispatch handler --------------------
-    def _scan_low_level_sdk(self, f: SourceFile, func_index: dict) -> list[Finding]:
+    def _scan_low_level_sdk(self, f: SourceFile) -> list[Finding]:
         handlers = _decorated_in_file(f, _is_call_tool_decorator)
         if len(handlers) != 1:
             # Zero, or more than one, call_tool handler in this file --
@@ -273,19 +276,20 @@ class SecretLeakResponseDetector(Detector):
             return []
         handler = handlers[0]
         handler_label = f"the '{handler.name}' dispatch handler"
+        file_func_index = _file_function_index(f)
 
         out: list[Finding] = []
-        for tool_name, stmts in dispatch_segments(handler):
+        for tool_name, stmts, _shared in dispatch_segments(handler):
             label = f"Tool '{tool_name}'" if tool_name else handler_label
             for ret in _stmts_direct_returns(stmts):
                 if ret.value is None:
                     continue
                 out.extend(self._check_return(f, label, ret))
-            for cf, cnode in _one_hop_dispatched_funcs(stmts, func_index, handler):
+            for cnode in _one_hop_dispatched_funcs(stmts, file_func_index, handler):
                 for ret in _direct_returns(cnode):
                     if ret.value is None:
                         continue
-                    out.extend(self._check_return(cf, label, ret))
+                    out.extend(self._check_return(f, label, ret))
         return out
 
     # --- JS/TS: registration-window return regex (no AST available) ------

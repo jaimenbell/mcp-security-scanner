@@ -92,3 +92,42 @@ def test_lowlevel_sdk_ambiguous_call_tool_file_never_guessed(tmp_path):
         f"an ambiguous (2+ call_tool handlers) file must be skipped entirely, "
         f"got: {result.findings}"
     )
+
+
+# --------------------------------------------------------------------- #
+# P0-2 N-vote fix: one-hop helper resolution must be SAME-FILE-ONLY
+# --------------------------------------------------------------------- #
+def test_p0_2_cross_file_same_name_helper_not_followed(fixtures_dir):
+    """A same-named `_format` in an unrelated, never-imported file elsewhere
+    in the repo must NOT be resolved as the one-hop helper for a call in
+    server.py -- that would fabricate a P0 os.environ leak against a clean
+    tool. Repro straight from the N-vote refuter."""
+    result = scan_repo(
+        str(fixtures_dir / "clean_secret_leak_lowlevel_cross_file_collision"),
+        [SecretLeakResponseDetector()],
+    )
+    assert result.findings == [], (
+        f"cross-file same-named helper must never be followed by the one-hop "
+        f"resolver, got: {[(f.file, f.detail) for f in result.findings]}"
+    )
+
+
+# --------------------------------------------------------------------- #
+# P3 N-vote fix: detector-level end-to-end proof for the negated-guard shape
+# --------------------------------------------------------------------- #
+def test_p3_negated_guard_shape_still_flags_via_whole_handler_fallback(fixtures_dir):
+    """rag-mcp's REAL dispatch shape (`if name != "x": ... else: ...`) isn't
+    recognized as attributable dispatch (only `==` is), but the leak in the
+    else-body must still surface via the whole-handler fallback -- an
+    end-to-end proof beyond the `_string_eq_literal` unit test alone."""
+    result = scan_repo(
+        str(fixtures_dir / "vuln_secret_leak_lowlevel_negated_guard"),
+        [SecretLeakResponseDetector()],
+    )
+    hits = [f for f in result.findings if "environ" in f.detail.lower()]
+    assert hits, f"expected the else-body os.environ leak to fire, got: {result.findings}"
+    for f in hits:
+        assert "search_knowledge" not in f.detail, (
+            f"a `!=`-guarded shape must not be guessed at one tool name, got: {f.detail}"
+        )
+        assert "call_tool" in f.detail or "dispatch handler" in f.detail
