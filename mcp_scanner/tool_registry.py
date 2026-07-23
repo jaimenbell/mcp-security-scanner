@@ -33,6 +33,32 @@ credited even when the handler wiring is opaque to the static pass.
 Honesty note: this is name/shape-based discovery, not a resolved import graph.
 It is deliberately generous (over-discover rather than miss a tool) to match
 the scanner's over-flag philosophy.
+
+2026-07-23 N-vote correction: the first cut of the low-level-SDK discovery
+(3, above) rooted EVERY ``Tool()`` construction repo-wide to whichever
+``@server.call_tool()`` handler a nondeterministic file walk happened to
+find first. In any repo with more than one low-level dispatcher (a vendored
+SDK example next to the real server, an admin/public split, a monorepo), a
+genuinely tool-reachable sink could be silently rooted to the WRONG
+dispatcher and mis-graded CLI_ONLY/UNCALLED with lowered confidence instead
+of the honest pre-patch UNKNOWN -- a confident severity downgrade, the one
+direction this scanner must never fail in. Fixed by scoping the Tool()<->
+dispatcher correlation to a single file/module (never repo-wide) and never
+guessing a root when a file's dispatcher is ambiguous (zero or more than one
+candidate) -- see ``_extract_low_level_sdk``. A same-named non-MCP ``Tool``/
+``call_tool`` (e.g. a LangChain-shaped local class) is excluded via an
+import-provenance gate (``_file_imports_mcp``): a file must actually import
+something from the ``mcp`` package before its Server()/list_tools/call_tool/
+Tool() shapes are trusted.
+
+Known gap, disclosed rather than silently left (out of scope for this pass):
+``detectors/tool_scope_creep.py`` only consumes this registry's JS-regex
+entries (``source == "js-regex"``) -- its Python path re-derives decorator
+matches directly via ``_is_tool_decorator`` rather than reading
+``py-decorator``/``py-lowlevel-sdk`` registrations. A repo using ONLY the
+low-level SDK shape therefore gets zero write-tools-on-by-default /
+tool-scope-creep (detector 5) coverage today. Wiring that is a separate,
+future increment.
 """
 
 from __future__ import annotations
@@ -148,10 +174,10 @@ def _extract_js(f: SourceFile) -> list[ToolRegistration]:
 #
 # Unlike the decorator-per-tool shape, one dispatch function handles every
 # registered tool by name -- there is no per-tool handler function to point
-# at. The ``@server.call_tool()`` function itself is the call-graph root
-# every declared tool shares (same rationale ``reachability.py`` already
-# uses tool_nodes for: it's the code that actually runs when any tool is
-# invoked).
+# at. The ``@server.call_tool()`` function is the call-graph root a file's
+# declared tools share -- but see the per-file scoping note on
+# ``_extract_low_level_sdk`` below (2026-07-23 N-vote correction): that
+# correlation is same-file only, never a repo-wide first-found guess.
 # --------------------------------------------------------------------- #
 def _is_call_tool_decorator(deco: ast.AST) -> bool:
     """True for ``@server.call_tool()`` (low-level MCP SDK dispatch handler)."""
@@ -169,7 +195,10 @@ def _is_list_tools_decorator(deco: ast.AST) -> bool:
 
 def _is_tool_construction(call: ast.Call) -> bool:
     """True for ``types.Tool(...)`` / bare ``Tool(...)`` (the low-level SDK's
-    tool-metadata constructor -- data, not a decorator)."""
+    tool-metadata constructor -- data, not a decorator). Callers must ALSO
+    gate on ``_file_imports_mcp`` for the owning file -- this predicate is
+    name-shape-only and, alone, matches an unrelated same-named class (e.g.
+    LangChain's ``Tool``)."""
     dotted = _dotted(call.func)
     return bool(dotted) and dotted.split(".")[-1] == "Tool"
 
@@ -185,50 +214,86 @@ def _tool_ctor_name(call: ast.Call) -> str | None:
     return None
 
 
-def _find_decorated(ctx: RepoContext, is_match) -> list[ast.AST]:
-    """Every FunctionDef/AsyncFunctionDef, repo-wide, carrying a decorator
-    ``is_match`` accepts."""
-    out: list[ast.AST] = []
-    for f in ctx.files:
-        if f.tree is None:
-            continue
-        for node in ast.walk(f.tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if any(is_match(d) for d in node.decorator_list):
-                out.append(node)
-    return out
+def _file_imports_mcp(f: SourceFile) -> bool:
+    """Import-provenance gate (2026-07-23 N-vote fix, P1): True only if this
+    file actually imports something from the ``mcp`` package (``import mcp``
+    / ``import mcp.xxx`` / ``from mcp import ...`` / ``from mcp.xxx import
+    ...``). Required before a file's ``Server()``/``call_tool()``/
+    ``list_tools()``/``Tool()`` name-shapes are trusted as the real MCP
+    low-level SDK -- otherwise a same-named non-MCP class (a LangChain
+    ``class Tool``, an unrelated ``.call_tool()``-named method on some other
+    framework's dispatcher) flips ``has_tools`` True and can claim a bogus
+    reachability root for a sink the real server never exposes (reproduced
+    by the N-vote refuters)."""
+    if f.tree is None:
+        return False
+    for node in ast.walk(f.tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "mcp" or alias.name.startswith("mcp.") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and (node.module == "mcp" or node.module.startswith("mcp.")):
+                return True
+    return False
+
+
+def _decorated_in_file(f: SourceFile, is_match) -> list[ast.AST]:
+    """Every FunctionDef/AsyncFunctionDef in this ONE file carrying a
+    decorator ``is_match`` accepts. Same-file only by design -- see
+    ``_extract_low_level_sdk``."""
+    if f.tree is None:
+        return []
+    return [
+        n for n in ast.walk(f.tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(is_match(d) for d in n.decorator_list)
+    ]
 
 
 def _extract_low_level_sdk(ctx: RepoContext) -> list[ToolRegistration]:
     """Low-level MCP SDK pattern: harvest every ``types.Tool(name=...)`` /
-    bare ``Tool(name=...)`` construction repo-wide, and correlate it with the
-    ``@server.call_tool()`` dispatch function (if any is found anywhere in
-    the repo) as its call-graph reachability root.
+    bare ``Tool(name=...)`` construction, gated per file on
+    ``_file_imports_mcp``, and correlate it with a call-graph reachability
+    root -- SAME-FILE ONLY.
 
-    Deliberately generous, matching this module's over-discover philosophy:
-    a ``Tool(...)`` construction with no resolvable ``name=`` string constant
-    still counts (synthetic fallback name) rather than being silently
-    dropped, and correlation is repo-wide rather than same-file-only because
-    the construction and the dispatch handler commonly live in the same
-    file (rag-mcp's shape) but are not required to.
+    2026-07-23 N-vote correction: the original cut rooted every Tool()
+    construction repo-wide to whichever ``@server.call_tool()`` handler a
+    nondeterministic file walk found first -- wrong, and sometimes a
+    confident severity DOWNGRADE, in any repo with more than one low-level
+    dispatcher. Correlation is now scoped to the file the Tool() construction
+    lives in:
+
+      * exactly one ``@server.call_tool()`` handler in that file -> that is
+        the root (the common, unambiguous case -- rag-mcp's shape, and any
+        multi-file repo where each file owns one dispatcher);
+      * zero call_tool handlers but exactly one ``@server.list_tools()``
+        handler in that file -> fall back to it as the root;
+      * otherwise (zero or MORE THAN ONE candidate in that file) -> no root
+        is claimed. The tool still registers (``has_tools`` stays True --
+        that signal is still correct: a real ``Tool()`` construction was
+        found), but with ``node=None``, which is exactly the pre-patch
+        UNKNOWN behavior for that finding downstream -- never a guess.
+
+    Iteration is over ``sorted(ctx.files, key=rel)`` so output order (and
+    which same-file handler is picked when, rarely, more than one exists) is
+    deterministic regardless of the underlying file-discovery order.
     """
-    call_tool_handlers = _find_decorated(ctx, _is_call_tool_decorator)
-    if call_tool_handlers:
-        # Single-server repos have exactly one dispatch function; the first
-        # discovered is the shared root for every declared tool.
-        handler_node: ast.AST | None = call_tool_handlers[0]
-    else:
-        # No call_tool dispatch found -- fall back to the list_tools handler
-        # itself as the root so reachability can still say something rather
-        # than nothing, on the same generous-over-silent principle.
-        list_tools_handlers = _find_decorated(ctx, _is_list_tools_decorator)
-        handler_node = list_tools_handlers[0] if list_tools_handlers else None
-
     out: list[ToolRegistration] = []
-    for f in ctx.files:
-        if f.tree is None:
+    for f in sorted(ctx.files, key=lambda sf: sf.rel):
+        if f.tree is None or not _file_imports_mcp(f):
             continue
+
+        call_tool_handlers = _decorated_in_file(f, _is_call_tool_decorator)
+        if len(call_tool_handlers) == 1:
+            handler_node: ast.AST | None = call_tool_handlers[0]
+        elif not call_tool_handlers:
+            list_tools_handlers = _decorated_in_file(f, _is_list_tools_decorator)
+            handler_node = list_tools_handlers[0] if len(list_tools_handlers) == 1 else None
+        else:
+            # More than one call_tool dispatcher in this single file --
+            # genuinely ambiguous, never guess.
+            handler_node = None
+
         for node in ast.walk(f.tree):
             if not isinstance(node, ast.Call) or not _is_tool_construction(node):
                 continue

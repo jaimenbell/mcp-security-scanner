@@ -49,14 +49,19 @@ def _git_tracked(root: Path) -> tuple[set[str], bool]:
 
 
 def _iter_source_paths(root: Path, tracked: set[str], is_git: bool):
+    # Sorted regardless of source (2026-07-23 N-vote fix, P0): ``tracked`` is
+    # a set (hash-order, not insertion/alphabetical) and ``rglob`` order is
+    # filesystem-dependent -- neither is a stable contract. Downstream passes
+    # (tool_registry's low-level-SDK handler pick when a file genuinely has
+    # more than one candidate) must not depend on file-discovery order.
     if is_git and tracked:
-        for rel in tracked:
+        for rel in sorted(tracked):
             p = root / rel
             if p.suffix.lower() in _SCAN_SUFFIXES and p.is_file():
                 yield p, rel
         return
     # Non-git fallback: walk the tree.
-    for p in root.rglob("*"):
+    for p in sorted(root.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in _SCAN_SUFFIXES:
             continue
         if any(part in _SKIP_DIRS or part.endswith(".egg-info") for part in p.parts):
