@@ -92,13 +92,17 @@ def test_real_secret_with_no_marker_stays_high_confidence():
 PEM_DIR = Path(__file__).parent / "fixtures" / "pem_material"
 
 
-def test_p0b_repro_prod_cn_short_validity_still_flags():
+def test_p0b_repro_prod_cn_short_validity_still_flags(tmp_path):
     # A2's exact repro: a self-signed cert with a PROD-shaped CN (no
     # test/localhost/example/demo/dummy/mock marker) but a SHORT (<=90
     # day) validity and a normal 2048-bit key, sitting at a test-fixture
     # path. Round-2's OR-gate let validity-alone demote this to total
     # invisibility. Must stay a flagged (even if demoted-confidence)
     # finding -- never zero-trace.
+    #
+    # Generated fresh into pytest's tmp_path (never into the tracked
+    # fixtures tree) -- a random key each run means a static committed
+    # copy would spuriously diff on every test invocation.
     from mcp_scanner.detectors.secret_handling import _cert_has_test_shaped_identity
     import datetime
     from cryptography import x509
@@ -118,7 +122,7 @@ def test_p0b_repro_prod_cn_short_validity_still_flags():
         .not_valid_after(now + datetime.timedelta(days=90))  # exactly the repro boundary
         .sign(key, hashes.SHA256())
     )
-    tmp_dir = PEM_DIR / "p0b_prod_short_validity"
+    tmp_dir = tmp_path / "tests" / "p0b_prod_short_validity"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     cert_path = tmp_dir / "cert.pem"
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -129,8 +133,8 @@ def test_p0b_repro_prod_cn_short_validity_still_flags():
     )
 
     ctx = RepoContext(
-        root=PEM_DIR.parent.parent,
-        files=[], tracked={"fixtures/pem_material/p0b_prod_short_validity/cert.pem"}, is_git=True,
+        root=tmp_path,
+        files=[], tracked={"tests/p0b_prod_short_validity/cert.pem"}, is_git=True,
     )
     findings = SecretHandlingDetector().run(ctx)
     tf = [f for f in findings if f.vuln_class == "tracked-secret-file"]
