@@ -74,6 +74,21 @@ def test_selfsigned_key_paired_with_selfsigned_cert_demoted():
     assert tf == [], f"a private key paired with a self-signed test cert must be demoted, got {tf}"
 
 
+def test_mismatched_key_beside_unrelated_selfsigned_cert_still_flagged():
+    # Pre-hardened against a masked-real-secret shape: directory
+    # co-location alone (a REAL, unrelated private key sitting beside an
+    # unrelated self-signed test cert, both conventionally named
+    # cert.pem/key.pem) must NOT be enough to demote -- the key must
+    # cryptographically match the cert's public key.
+    ctx = RepoContext(
+        root=PEM_DIR.parent.parent,
+        files=[], tracked={"fixtures/pem_material/mismatched_pair/key.pem"}, is_git=True,
+    )
+    findings = SecretHandlingDetector().run(ctx)
+    tf = [f for f in findings if f.vuln_class == "tracked-secret-file"]
+    assert tf, "a key that does NOT cryptographically match its sibling cert must still flag"
+
+
 def test_key_without_sibling_cert_still_flagged():
     # Isolated directory with only the key present -- no sibling cert.
     ctx = RepoContext(
