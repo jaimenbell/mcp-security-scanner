@@ -116,6 +116,19 @@ def test_load_scan_list_of_results_needs_target_key(tmp_path):
     assert scan["findings"]
 
 
+def test_load_scan_accepts_bom_utf8_and_utf16(tmp_path):
+    """PowerShell 5.1 redirects (`mcp-scan ... --json > scan.json`) emit
+    BOM'd UTF-8 or UTF-16 -- the operator's own most common workflow must
+    not be rejected."""
+    payload = json.dumps(_scan_dict())
+    bom8 = tmp_path / "bom8.json"
+    bom8.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+    assert rg.load_scan(bom8)["findings"]
+    u16 = tmp_path / "u16.json"
+    u16.write_bytes(payload.encode("utf-16"))  # includes the UTF-16 BOM
+    assert rg.load_scan(u16)["findings"]
+
+
 # --------------------------------------------------------------------- #
 # load_annotations
 # --------------------------------------------------------------------- #
