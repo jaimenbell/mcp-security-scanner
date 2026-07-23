@@ -145,17 +145,28 @@ def test_cross_file_one_hop_shell_true_sink_stays_p1_high(fixtures_dir):
 
 
 # --------------------------------------------------------------------- #
-# Attribute-only fix for the `_MUTATING_SINK_SHORT` fallback: a BARE call to
-# a user-defined function literally named `run` (no receiver/attribute at
-# all) must never be classified as a sink purely by exact short-name
-# equality -- same false-positive family as the substring bug, one level
-# down. An attribute call (`x.run(...)`) still matches, unchanged.
+# Round-2 N-vote fix pass (2026-07-23): a bare call must be RESOLVED, never
+# blanket-included or blanket-excluded. With a ctx that resolves "run" to a
+# repo-internal function, it is NOT a direct sink (the hop machinery
+# inspects that function's real body elsewhere). With no resolution
+# available at all (ctx=None, or a ctx that doesn't know this name), the
+# bare call falls through to the over-flag-safe short-name fallback --
+# restoring base's pre-existing catch on a shape this pass can't prove
+# safe (refuter A's exact P0 complaint against the round-1 blanket
+# exclusion). An attribute call (`x.run(...)`) always matches regardless.
 # --------------------------------------------------------------------- #
-def test_bare_call_named_run_is_not_a_sink_but_attribute_call_is():
+def test_bare_call_resolved_via_ctx_vs_unresolvable():
+    from mcp_scanner.detectors.tool_scope_creep import _SinkFileCtx
+
     bare = _call_from_src("run(1, 2)")
-    assert _is_mutating_sink_call(bare) is False, (
-        "a bare call to a user-defined function literally named 'run' must "
-        "not be classified as a mutating sink by exact short-name match alone"
+    resolved_ctx = _SinkFileCtx(local_names=frozenset({"run"}))
+    assert _is_mutating_sink_call(bare, resolved_ctx) is False, (
+        "a bare call resolved (via ctx) to a repo-internal function must "
+        "not be classified as a mutating sink by itself"
+    )
+    assert _is_mutating_sink_call(bare) is True, (
+        "a bare call with NO resolution available at all must over-flag "
+        "(restores base's pre-existing catch -- refuter A's P0)"
     )
     attr = _call_from_src("subprocess.run(cmd, shell=True)")
     assert _is_mutating_sink_call(attr) is True, (
