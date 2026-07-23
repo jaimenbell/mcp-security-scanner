@@ -27,6 +27,31 @@ only" disclosure (cross-file taint tracking is explicitly out of scope), with
 one deliberate, narrow extension (a single hop through a directly-called
 helper function) because that thin-wrapper-delegates-to-a-gated-helper shape
 is the dominant real pattern this hazard needs to not false-positive on.
+
+Low-level MCP SDK coverage (2026-07-23): this detector used to consume only
+``extract_tool_registry``'s ``source == "js-regex"`` entries and re-derive
+its own decorator walk directly for Python — a repo using ONLY the low-level
+SDK shape (``Server()`` + a single ``@server.call_tool()`` dispatch function,
+no ``@mcp.tool()`` decorators anywhere) got zero coverage regardless of how
+many ungated mutating tools it registered. Fixed via
+``tool_registry.dispatch_segments``: for each file gated on
+``_file_imports_mcp`` with exactly one ``@server.call_tool()`` handler (zero
+or ambiguous -> skip, never guess a root), the handler body is split into
+per-tool branches (the "effective body" scope-creep analysis needs). A
+branch attributable to one specific literal tool name (``if name == "x":``)
+is classified/attributed to that tool exactly like a decorator-registered
+one; a branch that isn't (an ``in (...)`` test, the final ``else``, code
+outside the if/elif chain, or no dispatch shape at all) is attributed to the
+dispatch handler itself — never a guessed tool name — mirroring
+``secret_leak_response.py``'s identical low-level-SDK extension. Known
+boundary, disclosed rather than silently left: only a literal ``==`` if/elif
+walk is recognized as attributable dispatch; a dict-keyed dispatch table or
+``match``/``case`` statement falls back to whole-handler attribution. A gate
+found anywhere in the handler's own decorator/body text (module-level env
+gate, or a shared pre-dispatch permission check that runs before every
+branch) is treated as gating every branch in that handler — a deliberately
+coarse, disclosed heuristic (same breadth already accepted for the existing
+module-level gate), not per-branch dataflow proof.
 """
 
 from __future__ import annotations
@@ -37,7 +62,16 @@ import tokenize
 import io
 
 from ..models import Finding, Severity, Confidence
-from ..tool_registry import _dotted, _is_tool_decorator, _declared_tool_name, extract_tool_registry
+from ..tool_registry import (
+    _dotted,
+    _is_tool_decorator,
+    _declared_tool_name,
+    extract_tool_registry,
+    _is_call_tool_decorator,
+    _file_imports_mcp,
+    _decorated_in_file,
+    dispatch_segments,
+)
 from .. import js_util
 from .base import Detector, RepoContext, SourceFile
 
@@ -242,8 +276,100 @@ class ToolScopeCreepDetector(Detector):
                     ),
                     snippet=f.line_at(node.lineno),
                 ))
+            if _file_imports_mcp(f):
+                findings.extend(self._scan_low_level_sdk(f, func_index, gated_names))
         findings.extend(self._scan_js(ctx))
         return findings
+
+    # --- low-level MCP SDK: call_tool dispatch handler --------------------
+    def _scan_low_level_sdk(self, f: SourceFile, func_index: dict, gated_names: set) -> list[Finding]:
+        handlers = _decorated_in_file(f, _is_call_tool_decorator)
+        if len(handlers) != 1:
+            # Zero, or more than one, call_tool handler in this file --
+            # never guess a root (mirrors _extract_low_level_sdk).
+            return []
+        handler = handlers[0]
+        module_gate = _module_level_env_gate(f)
+        # Deliberately coarse (disclosed): a gate hint anywhere in the
+        # handler's own decorator list or full body text -- covers a shared
+        # pre-dispatch permission check that runs before every branch --
+        # gates every branch in this handler, not just the segment it's
+        # textually in.
+        shared_gate = module_gate or _node_has_gate(f, handler)
+
+        out: list[Finding] = []
+        for tool_name, stmts in dispatch_segments(handler):
+            sink_hit, indirect_gate = self._inspect_stmts(stmts, func_index, gated_names)
+            by_name = bool(tool_name) and bool(_MUTATING_VERB.match(tool_name))
+            is_mutating = by_name or sink_hit
+            if not is_mutating:
+                continue
+
+            gated = shared_gate or indirect_gate or self._stmts_have_gate(f, stmts)
+            if gated:
+                continue
+
+            sev = Severity.P1 if sink_hit else Severity.P2
+            conf = Confidence.HIGH if sink_hit else Confidence.MEDIUM
+            line = stmts[0].lineno if stmts else handler.lineno
+            if tool_name:
+                subject = f"Tool '{tool_name}'"
+                title = f"Mutating tool '{tool_name}' has no visible permission gate"
+            else:
+                subject = f"An unattributed branch of the '{handler.name}' dispatch handler"
+                title = (
+                    f"Mutating branch of low-level dispatch handler '{handler.name}' "
+                    "has no visible permission gate (tool not attributable)"
+                )
+            out.append(Finding(
+                vuln_class=self.name,
+                title=title,
+                severity=sev, confidence=conf,
+                file=f.rel, line=line,
+                detail=(
+                    f"{subject} looks mutating "
+                    f"({'a dangerous sink is reachable from its body' if sink_hit else 'by its name'}), "
+                    "but no permission-group gate, env-flag opt-in, or explicit auth check is "
+                    "visible on the dispatch handler, this branch, or a directly-called helper. "
+                    "Any caller (the LLM, or anything that can reach this MCP server) can invoke "
+                    "it unconditionally."
+                ),
+                remediation=(
+                    "Gate every mutating tool behind an explicit, default-OFF env flag and/or "
+                    "permission-group check enforced before any side effect runs — e.g. a shared "
+                    "check at the top of the dispatch handler, or per-branch, checked before the "
+                    "sink executes."
+                ),
+                snippet=f.line_at(line),
+            ))
+        return out
+
+    def _inspect_stmts(self, stmts: list[ast.stmt], func_index: dict, gated_names: set) -> tuple[bool, bool]:
+        """Same one-hop helper-delegation logic as ``_inspect_body``, scoped
+        to a ``dispatch_segments`` branch (a list of statements) instead of a
+        single function node."""
+        sink_hit = any(_body_has_mutating_sink(s) for s in stmts)
+        indirect_gate = False
+        for stmt in stmts:
+            for sub in ast.walk(stmt):
+                if not isinstance(sub, ast.Call):
+                    continue
+                dotted = _dotted(sub.func)
+                short = dotted.split(".")[-1] if dotted else ""
+                if not short or short not in func_index:
+                    continue
+                for _cf, cnode in func_index[short]:
+                    if not sink_hit and _body_has_mutating_sink(cnode):
+                        sink_hit = True
+                    if short in gated_names:
+                        indirect_gate = True
+        return sink_hit, indirect_gate
+
+    def _stmts_have_gate(self, f: SourceFile, stmts: list[ast.stmt]) -> bool:
+        if not stmts:
+            return False
+        body_src = _strip_py_comments("\n".join(_source_segment(f, s) for s in stmts))
+        return bool(_GATE_HINT.search(body_src) or _ENV_OPT_IN.search(body_src))
 
     # --- JS/TS: line-window sink/gate regex (no AST available) -----------
     def _scan_js(self, ctx: RepoContext) -> list[Finding]:
