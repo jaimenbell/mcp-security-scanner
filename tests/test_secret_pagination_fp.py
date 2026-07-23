@@ -68,15 +68,17 @@ def test_jwt_value_under_pagination_name_still_flags_by_shape():
     assert hits, f"a JWT-shaped value under a pagination-named variable must still flag, got {r.findings}"
 
 
-def test_bearer_pattern_does_not_flag_obviously_fake_test_fixture_value():
-    # Live fleet-sweep catch (post P1-5, found during this same round-2
-    # pass): the new Bearer-prefixed backstop pattern flagged github-mcp's
-    # OWN test fixture, "Bearer github_pat_fake_test_token_1234" -- an
-    # obviously-named fake value. Real secrets essentially never spell out
-    # "fake"/"test"/"dummy" as a substring.
+def test_bearer_pattern_demotes_obviously_fake_test_fixture_value():
+    # Round-3 N-vote P0-A fix: fake-marker matches now DEMOTE (confidence
+    # -> LOW, tagged "(fake-marker)"), they never fully suppress -- round-
+    # 2's version of this guard was an unanchored full-suppress, which is
+    # exactly the "special-case exception to the one law" both refuters
+    # killed live (a real secret merely containing a marker word, e.g. a
+    # "sample-tier" component, would have vanished to zero findings).
     import ast
     from mcp_scanner.detectors.base import RepoContext, SourceFile
     from mcp_scanner.detectors import SecretHandlingDetector
+    from mcp_scanner.models import Confidence
     from pathlib import Path
 
     src = 'AUTH_HEADER = "Bearer github_pat_fake_test_token_1234"\n'
@@ -85,7 +87,9 @@ def test_bearer_pattern_does_not_flag_obviously_fake_test_fixture_value():
     ctx = RepoContext(root=Path("."), files=[f], tracked=set(), is_git=False)
     findings = SecretHandlingDetector().run(ctx)
     hits = [fi for fi in findings if fi.vuln_class == "hardcoded-secret"]
-    assert hits == [], f"an obviously-fake Bearer test fixture must not flag, got {hits}"
+    assert hits, "a fake-marked value must still produce a finding (demoted, not dropped)"
+    assert hits[0].confidence == Confidence.LOW
+    assert "fake-marker" in hits[0].title
 
 
 def test_bearer_pattern_still_flags_a_real_looking_token():

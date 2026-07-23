@@ -75,15 +75,20 @@ def test_placeholder_word_as_prefix_of_real_value_no_longer_falsely_excluded():
     assert hits, "a value merely starting with a placeholder word (not equal to it) must still flag"
 
 
-def test_obviously_fake_named_test_fixture_not_flagged():
-    # Live fleet-sweep catch (this branch was dead code before this fix,
-    # so it had never been sweep-tested): discord-mcp's OWN test fixture,
-    # `TEST_TOKEN = "fake-test-token-do-not-use"` -- obviously fake by its
-    # own literal value text.
+def test_obviously_fake_named_test_fixture_demoted_not_dropped():
+    # Round-3 N-vote fix: a fake-marker match DEMOTES (confidence -> LOW,
+    # tagged), it never fully suppresses -- round-2's version of this
+    # guard was a silent `continue`, which is exactly the special-case
+    # exception to the one law both refuters killed live. discord-mcp's
+    # OWN test fixture, `TEST_TOKEN = "fake-test-token-do-not-use"`,
+    # obviously fake by its own literal value text, must still surface as
+    # a LOW-confidence, tagged finding.
     src = 'TEST_TOKEN = "fake-test-token-do-not-use"\n'
     findings = _scan_src(src)
     hits = [f for f in findings if f.vuln_class == "hardcoded-secret"]
-    assert hits == [], f"an obviously-fake test-fixture value must not flag, got {hits}"
+    assert hits, "a fake-marked assignment must still produce a finding (demoted, not dropped)"
+    assert hits[0].confidence == Confidence.LOW
+    assert "fake-marker" in hits[0].title
 
 
 def test_placeholder_regex_has_no_empty_alternative():
