@@ -78,3 +78,38 @@ def test_lowlevel_sdk_ambiguous_file_skipped_but_valid_sibling_still_flagged(fix
     assert any("y_valid.py" in f.file for f in hits), (
         f"the unambiguous sibling file's ungated sink must still be flagged, got: {result.findings}"
     )
+
+
+# --------------------------------------------------------------------- #
+# P0-1 N-vote fix: gate detection must be per-branch, not whole-handler-text
+# --------------------------------------------------------------------- #
+def test_p0_1_sibling_branch_gate_does_not_silence_ungated_sibling(fixtures_dir):
+    """A gate hint ("is_authorized") inside the read_file branch must not
+    silence delete_file's own genuinely ungated os.remove() sink in the same
+    handler -- the exact false negative the N-vote refuter reproduced live
+    against the previous whole-handler-text `_node_has_gate` check."""
+    result = scan_repo(str(fixtures_dir / "vuln_tool_scope_lowlevel_sibling_gate"), [ToolScopeCreepDetector()])
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    titles = " ".join(f.title for f in hits)
+    assert "delete_file" in titles, (
+        f"delete_file's ungated sink must still be flagged despite the sibling "
+        f"branch's gate hint, got: {[f.title for f in hits]}"
+    )
+    assert "read_file" not in titles, f"read_file is gated and non-mutating, must stay quiet, got: {titles}"
+
+
+# --------------------------------------------------------------------- #
+# P3 N-vote fix: detector-level end-to-end proof for the negated-guard shape
+# --------------------------------------------------------------------- #
+def test_p3_negated_guard_shape_still_flags_via_whole_handler_fallback(fixtures_dir):
+    """rag-mcp's real `if name != "x": ... else: ...` shape isn't recognized
+    as attributable dispatch, but the ungated mutating sink in the else-body
+    must still surface via the whole-handler fallback."""
+    result = scan_repo(str(fixtures_dir / "vuln_tool_scope_lowlevel_negated_guard"), [ToolScopeCreepDetector()])
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    assert hits, f"expected the else-body os.remove() sink to be flagged, got: {result.findings}"
+    for f in hits:
+        assert "delete_file" not in f.title, (
+            f"a `!=`-guarded shape must not be guessed at one tool name, got: {f.title}"
+        )
+        assert "call_tool" in f.title or "dispatch handler" in f.title
