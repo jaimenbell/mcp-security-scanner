@@ -108,8 +108,11 @@ coarse, disclosed heuristic (same breadth already accepted for the existing
 module-level gate), not per-branch dataflow proof.
 
 Round 3 -- sink-substring-fix lane (2026-07-23, sink-classification fix +
-severity calibration): ``_is_mutating_sink_call`` used a bare SUBSTRING test
--- ``if "subprocess" in name`` -- against the call's own dotted/bare name.
+severity calibration; N-vote-hardened over TWO passes the same day --
+the round-1 fix below was itself proven wrong and replaced by round 2, see
+the correction after this section). ``_is_mutating_sink_call`` used a bare
+SUBSTRING test -- ``if "subprocess" in name`` -- against the call's own
+dotted/bare name.
 A HELPER FUNCTION whose name merely contains the word "subprocess" (e.g.
 ``_run_subprocess``) matched that test even when its body never touches the
 real ``subprocess`` module at all -- reproduced live against vllm-ops-mcp:
@@ -123,13 +126,24 @@ exact-equality on the call's bare short name with no requirement that the
 call even be an attribute access -- a bare call to a user-defined function
 literally named ``run`` or ``post`` matched it too.
 
-Fixed by replacing both with structural, dotted-name matching
-(``_SINK_DOTTED_EXACT`` for exact ``module.attr`` pairs; the short-name
-fallback now requires an actual "." in the resolved name, i.e. a real
-attribute access on SOME receiver, never a bare ``Name`` call) -- see
-``_is_mutating_sink_call``'s docstring. This closes the false-positive class
-categorically: a user-defined function whose NAME contains or equals a sink
-word is never, by itself, a sink.
+Round 1's fix (commit 2df84e1, SUPERSEDED -- see the round-2 N-vote fix
+comment above ``_SinkFileCtx`` for the full correction) replaced both with
+``_SINK_DOTTED_EXACT`` for exact ``module.attr`` pairs, plus gating the
+short-name fallback behind ``"." in name`` (a rendered-string syntax-shape
+proxy for "is this an attribute access"). Two N-vote refuters proved THIS
+over-corrected on both sides live: (P0) blanket-excluding every bare
+``Name`` call also silenced REAL sinks reached via a direct stdlib import
+(``from os import remove; remove(path)``); (P1) even for genuine attribute
+calls, ``_dotted`` collapses to the bare leaf whenever the receiver isn't a
+plain ``Name`` (``Path(x).unlink()``, ``requests.Session().post(url)``),
+so the "." gate silently missed those too. Round 2 replaced the syntax-shape
+proxy with RESOLUTION -- see ``_SinkFileCtx``/``_build_sink_file_ctx``/
+``_resolved_sink_name`` immediately below, and their preceding comment block
+for the complete history. This closes the false-positive class
+categorically without reopening either refuter's gap: a user-defined
+function whose NAME contains or equals a sink word is never, by itself, a
+sink UNLESS it's genuinely unresolvable (over-flag-safe fallback, matching
+this detector's pre-existing philosophy).
 
 Verified live fleet outcome (not the outcome originally hypothesized --
 stated precisely because the difference matters): vllm-ops-mcp's REAL call
@@ -182,6 +196,19 @@ verbs, sendmail, and open-for-write. A direct (same-body) or one-hop
 call without ``shell=True`` calibrates to P2; direct/cross-file
 ``shell=True`` sinks are unchanged at P1/HIGH).
 
+This calibration RESOLVES module aliases and bare stdlib-symbol imports
+before checking ``shell=True`` (``_resolved_sink_name``, round-2 N-vote fix,
+refuter A item 4) -- ``import subprocess as sp; sp.run(cmd)`` (no
+``shell=True``) correctly calibrates to P2 exactly like the un-aliased
+spelling, not an unconditional P1 (pinned in
+``tests/test_tool_scope_creep_sink_substring_fix_round2.py``, which also
+pins every refuter repro above as a permanent regression test, plus the
+``subprocess.getoutput``/``getstatusoutput`` recognition and the removed
+dead ``subprocess.popen`` (lowercase -- no such callable exists) entry, and
+a dedicated two-hop-miss fixture, ``clean_tool_scope_two_hop_probe_miss``,
+modeled directly on vllm-ops-mcp's real shape so the zero-findings outcome
+above has an actual regression guard, not just prose).
+
 Disclosed, out-of-scope follow-ups: (1) extending the one-hop resolver to a
 bounded second hop (would restore a P2-level finding for vllm-ops-mcp's real
 shape) -- a separate, larger initiative, not attempted here; (2) the JS/TS
@@ -199,6 +226,7 @@ import ast
 import re
 import tokenize
 import io
+from dataclasses import dataclass, field
 
 from ..models import Finding, Severity, Confidence
 from ..tool_registry import (
@@ -231,13 +259,21 @@ _MUTATING_SINK_SHORT = {
     "sendmail", "send_mail",                                 # messaging
 }
 
-# Exact `module.attr` dotted-path sink matches (round 3, 2026-07-23 -- see
-# `_is_mutating_sink_call`'s docstring for why this replaced a substring
-# test). `_dotted` only ever produces a "." when the call is an attribute
-# access, so exact membership here can never match a bare Name call.
+# Exact `module.attr` dotted-path sink matches (round 3, 2026-07-23; set
+# corrected in the round-2 N-vote fix pass same day -- see
+# `_is_mutating_sink_call`'s docstring). Matched against the RESOLVED
+# canonical name (module aliases and bare stdlib-symbol imports collapsed to
+# their real `module.attr` spelling by `_resolved_sink_name`), never a raw
+# rendered string. `subprocess.popen` (lowercase) was a dead entry removed in
+# the N-vote pass -- no such callable exists (only `os.popen`);
+# `subprocess.getoutput`/`getstatusoutput` added -- both real, always
+# shell-interpreted (no `shell=` kwarg exists on either), so they are
+# intentionally NOT in `_SUBPROCESS_RUN_LIKE` below and stay unconditionally
+# high-risk via `_is_high_risk_sink_call`'s fallthrough.
 _SINK_DOTTED_EXACT = {
     "subprocess.run", "subprocess.Popen", "subprocess.call",
-    "subprocess.check_output", "subprocess.check_call", "subprocess.popen",
+    "subprocess.check_output", "subprocess.check_call",
+    "subprocess.getoutput", "subprocess.getstatusoutput",
     "os.system", "os.popen", "os.remove", "os.unlink", "os.rmdir",
     "shutil.rmtree", "shutil.move",
 }
@@ -291,40 +327,211 @@ def _unparse(node: ast.AST) -> str:
     return ast.unparse(node) if hasattr(ast, "unparse") else ""
 
 
-def _is_mutating_sink_call(call: ast.Call) -> bool:
-    """True when ``call`` is a dangerous sink, matched STRUCTURALLY on the
-    resolved dotted attribute chain (``_dotted``) -- never on a substring or
-    bare-name test against a call's own identifier text. Round 3 (2026-07-23,
-    sink-substring-fix lane) replaced the previous ``"subprocess" in name``
-    substring check (which fired on ANY call whose bare/dotted name merely
-    CONTAINED the word "subprocess" -- including a bare call to a
-    user-defined helper literally named ``_run_subprocess``, the live
-    vllm-ops-mcp false-positive this lane fixed) with exact membership in
-    ``_SINK_DOTTED_EXACT``: since ``_dotted`` only ever inserts a "." when
-    the call is a real ``ast.Attribute`` access, a bare ``Name`` call (no
-    receiver at all) can never match this set, structurally ruling out the
-    "user-defined function whose NAME contains a sink word" false-positive
-    class entirely.
+# --------------------------------------------------------------------- #
+# Round-2 N-vote fix pass (2026-07-23, later same day than round 3 below):
+# TWO refuters proved live that the first cut's "." in name proxy was a
+# SYNTAX-SHAPE test standing in for "is this a real attribute access",
+# which is exactly the class of shortcut this file's own history keeps
+# re-learning not to take. Fixed by RESOLVING what the callee actually is,
+# using machinery this repo already owns (`_build_import_map`, the same-file
+# function index), instead of inferring it from how the rendered string
+# happens to look.
+#
+#   P0 (refuter A): the "." gate blanket-EXCLUDED every bare Name call --
+#   including a bare call to a REAL sink imported directly (`from os import
+#   remove; remove(path)`, `from shutil import rmtree; rmtree(d)`, `from
+#   subprocess import run; run(cmd, shell=True)`). Base (pre-this-lane) code
+#   caught all of these via `short in _MUTATING_SINK_SHORT` with no
+#   attribute-ness requirement at all; the first cut's blanket exclusion
+#   silenced them completely -- a straight regression, both detection paths.
+#
+#   P1 (refuter B): even restricted to attribute calls, `_dotted` collapses
+#   to the bare LEAF name whenever the receiver isn't a plain `Name` --
+#   `Path(x).unlink()`, `requests.Session().post(url)`, `get_proc().run(cmd)`
+#   all render as just "unlink"/"post"/"run" (no "." at all), so the "." in
+#   name gate silently missed every one of them despite being genuine,
+#   idiomatic attribute-call sink shapes. `Path(x).unlink()` in particular is
+#   THE idiomatic Python file-delete call.
+#
+# Fix, per call shape:
+#
+#   * A real ``ast.Attribute`` access (``isinstance(call.func,
+#     ast.Attribute)``) -- checked STRUCTURALLY, never by whether the
+#     rendered name happens to contain a "." -- matches the short-name
+#     fallback (``_MUTATING_SINK_SHORT``) regardless of what the receiver
+#     is, closing P1. A resolvable module alias (``import subprocess as
+#     sp; sp.run(...)``) is canonicalized to its real ``module.attr``
+#     spelling first (``_resolved_sink_name``) so exact-set matching and the
+#     shell=True severity axis both see through the alias.
+#   * A bare ``Name`` call is RESOLVED, never blanket-included or
+#     blanket-excluded (closing P0):
+#       1. bound by a direct stdlib-sink import (``from os import remove``,
+#          ``from subprocess import run``, ...) -- canonicalized to its real
+#          ``module.attr`` spelling and checked against ``_SINK_DOTTED_EXACT``
+#          exactly like the dotted spelling. This is the fix that makes both
+#          refuter A's repro AND the shell=True calibration axis see through
+#          a bare stdlib import.
+#       2. resolvable to a REPO-INTERNAL function (a same-file ``def``, or an
+#          explicit same-repo import per ``_build_import_map``) -- NOT a
+#          sink by itself; this is the original ``_run_subprocess`` false
+#          positive's correct fix -- the one-hop resolver inspects that
+#          function's REAL body elsewhere (see ``_inspect_body``), this
+#          function only classifies the call site itself.
+#       3. unresolvable (neither of the above -- an opaque/dynamic/external
+#          name this pass cannot prove safe) -- falls through to the same
+#          ``_MUTATING_SINK_SHORT`` short-name test as an attribute call,
+#          over-flag-safe, restoring base's pre-existing catch on shapes
+#          nothing here can resolve.
+#
+# See ``_SinkFileCtx``/``_build_sink_file_ctx``/``_resolved_sink_name`` for
+# the resolution machinery, and ``tests/test_tool_scope_creep_sink_substring_
+# fix.py`` for every refuter repro pinned as a regression test.
+# --------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class _SinkFileCtx:
+    """Per-file resolution context threaded into sink classification so it
+    can RESOLVE a callee instead of guessing from syntax shape.
 
-    The ``_MUTATING_SINK_SHORT`` fallback (HTTP verbs, subprocess/os short
-    names reached via SOME attribute receiver, e.g. ``session.post(...)``)
-    had the identical bug one level down: exact-equality on the call's own
-    short name, with no requirement that the call even BE an attribute
-    access -- a bare call to a user-defined function literally named ``run``
-    or ``post`` matched it too. Gated behind ``"." in name`` below: only
-    ``x.run(...)``-shaped attribute calls are eligible, never a bare
-    ``run(...)``. This is still a name-based heuristic for the receiver's
-    identity (no type resolution is attempted), disclosed and unchanged in
-    that respect from before this fix -- only the bare-call false-positive
-    class is closed."""
+    ``module_aliases``: local module-alias name -> canonical sink module
+    (``"sp"`` -> ``"subprocess"`` from ``import subprocess as sp``) --
+    restricted to ``_SINK_MODULES`` only, never a general import graph.
+
+    ``symbol_aliases``: local bare name -> canonical ``"module.attr"``
+    (``"remove"`` -> ``"os.remove"`` from ``from os import remove``,
+    ``"rm"`` -> ``"os.remove"`` from ``from os import remove as rm``) --
+    same restriction.
+
+    ``local_names``: bare names resolvable to something REPO-INTERNAL (a
+    same-file function definition, or an explicit same-repo import per
+    ``_build_import_map``) -- used only to decide that an unresolved-looking
+    bare call is "someone's own function, not a raw external/stdlib call",
+    never to prove it safe (the one-hop resolver still inspects its body)."""
+    module_aliases: dict[str, str] = field(default_factory=dict)
+    symbol_aliases: dict[str, str] = field(default_factory=dict)
+    local_names: frozenset[str] = field(default_factory=frozenset)
+
+
+_SINK_MODULES = ("os", "subprocess", "shutil")
+
+
+def _build_sink_file_ctx(
+    f: SourceFile,
+    files_by_rel: dict[str, SourceFile] | None = None,
+    local_func_names: set[str] | None = None,
+) -> _SinkFileCtx:
+    """Build ``f``'s sink-resolution context. ``files_by_rel`` is optional --
+    when omitted (the low-level-SDK path, which stays same-file-only by
+    existing convention), ``local_names`` is just ``local_func_names``
+    (same-file function definitions) with no cross-file import resolution;
+    when provided, it's unioned with ``_build_import_map(f,
+    files_by_rel)``'s keys -- any name ``_build_import_map`` records is
+    already, by its own construction, bound to a file INSIDE this scanned
+    repo (stdlib modules are never scanned-repo files), so its keys are
+    exactly "resolvable to something repo-internal", never a guess."""
+    module_aliases: dict[str, str] = {}
+    symbol_aliases: dict[str, str] = {}
+    if f.tree is not None:
+        for node in ast.walk(f.tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in _SINK_MODULES and alias.asname:
+                        module_aliases[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in _SINK_MODULES:
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        local = alias.asname or alias.name
+                        symbol_aliases[local] = f"{node.module}.{alias.name}"
+    local_names: set[str] = set(local_func_names or ())
+    if files_by_rel is not None:
+        local_names |= set(_build_import_map(f, files_by_rel).keys())
+    return _SinkFileCtx(
+        module_aliases=module_aliases,
+        symbol_aliases=symbol_aliases,
+        local_names=frozenset(local_names),
+    )
+
+
+def _canonicalize_dotted(name: str, module_aliases: dict[str, str]) -> str:
+    """Rewrite ``name``'s head module component via ``module_aliases`` when
+    aliased (``"sp.run"`` -> ``"subprocess.run"`` for ``import subprocess as
+    sp``). Non-aliased or bare names pass through untouched."""
+    if "." not in name or not module_aliases:
+        return name
+    head, _, rest = name.partition(".")
+    return f"{module_aliases[head]}.{rest}" if head in module_aliases else name
+
+
+def _resolved_sink_name(call: ast.Call, ctx: "_SinkFileCtx | None") -> tuple[str, bool]:
+    """Returns ``(canonical_name, is_attr)``: the callee's real dotted
+    ``module.attr`` spelling when resolvable via ``ctx`` (a module alias for
+    an attribute call, or a direct stdlib-sink import for a bare call), else
+    the raw ``_dotted`` rendering unchanged. Shared by
+    ``_is_mutating_sink_call`` (breadth) and ``_is_high_risk_sink_call``
+    (severity calibration) so both see through the identical aliasing --
+    closing the aliased-import calibration gap (round-2 N-vote fix, refuter
+    A item 4): ``import subprocess as sp; sp.run(cmd)`` (no ``shell=True``)
+    now correctly calibrates to P2, not an unconditional P1."""
+    name = _dotted(call.func)
+    is_attr = isinstance(call.func, ast.Attribute)
+    if ctx is None:
+        return name, is_attr
+    if is_attr:
+        return _canonicalize_dotted(name, ctx.module_aliases), is_attr
+    if name in ctx.symbol_aliases:
+        return ctx.symbol_aliases[name], is_attr
+    return name, is_attr
+
+
+def _is_mutating_sink_call(call: ast.Call, ctx: "_SinkFileCtx | None" = None) -> bool:
+    """True when ``call`` is a dangerous sink, matched STRUCTURALLY -- never
+    by substring, and never by whether a rendered string happens to contain
+    a "." (see the round-2 N-vote fix comment above ``_SinkFileCtx`` for the
+    full history of why that proxy was wrong on both sides). ``ctx`` (when
+    provided) resolves module aliases, direct stdlib-sink imports, and
+    repo-internal bare names; omitting it (``ctx=None``) degrades gracefully
+    to "no resolution available" -- exact dotted/attribute-short-name
+    matching still applies, only the bare-name resolution steps are skipped
+    (every existing call site in this file now passes a real ``ctx``)."""
     name = _dotted(call.func)
     if not name:
         return False
+    is_attr = isinstance(call.func, ast.Attribute)
+    canon, _ = _resolved_sink_name(call, ctx)
     short = name.split(".")[-1] if "." in name else name
-    if name in _SINK_DOTTED_EXACT:
+
+    if canon in _SINK_DOTTED_EXACT:
         return True
-    if "." in name and short in _MUTATING_SINK_SHORT:
-        return True
+
+    if is_attr:
+        # Structural: ANY real attribute access matches the short-name
+        # fallback regardless of what the receiver is (fixes refuter B's
+        # Path(x).unlink() / requests.Session().post() / get_proc().run()
+        # -- _dotted collapses all three to a bare leaf with no "."; gating
+        # on the rendered string's punctuation was the bug, not this test).
+        if short in _MUTATING_SINK_SHORT:
+            return True
+    else:
+        local_names = ctx.local_names if ctx is not None else frozenset()
+        if name in local_names:
+            # Resolvable to a repo-internal function (same-file def, or an
+            # explicit same-repo import) -- not a sink BY ITSELF; the
+            # one-hop resolver inspects its real body elsewhere. This is
+            # the correct fix for the original _run_subprocess false
+            # positive (the substring-fix lane's original bug).
+            return False
+        if short in _MUTATING_SINK_SHORT:
+            # Unresolvable bare name (not a known stdlib-sink import, not a
+            # repo-internal function) -- over-flag-safe fallback, restores
+            # base's pre-existing catch on a bare call this pass can't
+            # prove safe (fixes refuter A's P0: `from os import remove;
+            # remove(path)` etc. are caught earlier via `canon`, but a
+            # genuinely opaque bare `run(...)`/`post(...)` with no
+            # resolvable origin at all still needs to over-flag, matching
+            # base's original, pre-this-lane behavior).
+            return True
+
     if short == "open":
         mode = None
         if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant):
@@ -349,45 +556,46 @@ def _is_shell_true(call: ast.Call) -> bool:
     return False
 
 
-def _is_high_risk_sink_call(call: ast.Call) -> bool:
+def _is_high_risk_sink_call(call: ast.Call, ctx: "_SinkFileCtx | None" = None) -> bool:
     """A stricter subset of ``_is_mutating_sink_call``, used ONLY for
     SEVERITY/CONFIDENCE calibration -- never for the is-this-a-sink-at-all
     classification, which stays exactly as broad (over-flag-safe) via
-    ``_is_mutating_sink_call``. Round 3 (2026-07-23): the one axis where "is
-    it a sink" and "is it HIGH severity" honestly diverge is
-    ``subprocess.run``/``Popen``/``call``/``check_output``/``check_call``:
-    these accept a literal argv LIST with no shell interpretation unless
-    ``shell=True`` is explicitly passed (see ``_is_shell_true``). Its absence
-    -- a fixed argv list executed directly, e.g. vllm-ops-mcp's
-    ``_run_subprocess(["nvidia-smi", "--query-gpu=..."], ...)`` read-only
-    probe -- is a materially lower-risk shape than a shell-interpreted
-    string command. This is NOT a suppression: ``_is_mutating_sink_call``
-    still returns True for it (the finding still surfaces), only its
-    severity/confidence are calibrated down (see ``run()``/
-    ``_scan_low_level_sdk()``). Every OTHER sink pattern (``os.system``/
-    ``os.popen`` -- always shell-interpreted by construction, no argv-list
-    form exists; ``os.remove``/``unlink``/``rmdir``/``shutil.rmtree``/
-    ``move`` -- unconditional filesystem mutation; HTTP
-    post/put/delete/patch; sendmail; open-for-write) stays unconditionally
-    high-risk, identical to ``_is_mutating_sink_call``."""
-    name = _dotted(call.func)
-    if not name:
-        return False
-    if name in _SUBPROCESS_RUN_LIKE:
+    ``_is_mutating_sink_call``. The one axis where "is it a sink" and "is it
+    HIGH severity" honestly diverge is ``subprocess.run``/``Popen``/
+    ``call``/``check_output``/``check_call``: these accept a literal argv
+    LIST with no shell interpretation unless ``shell=True`` is explicitly
+    passed (see ``_is_shell_true``). Its absence -- a fixed argv list
+    executed directly, e.g. vllm-ops-mcp's ``_run_subprocess(["nvidia-smi",
+    "--query-gpu=..."], ...)`` read-only probe -- is a materially
+    lower-risk shape than a shell-interpreted string command. Resolution
+    (``_resolved_sink_name``) is applied FIRST so a module-aliased
+    (``sp.run``) or bare-stdlib-imported (``from subprocess import run``)
+    call is calibrated identically to the plain ``subprocess.run`` spelling
+    -- round-2 N-vote fix, refuter A item 4. This is NOT a suppression:
+    ``_is_mutating_sink_call`` still returns True for it (the finding still
+    surfaces), only its severity/confidence are calibrated down (see
+    ``run()``/``_scan_low_level_sdk()``). ``subprocess.getoutput``/
+    ``getstatusoutput`` (always shell-interpreted, no ``shell=`` kwarg
+    exists on either) are deliberately excluded from ``_SUBPROCESS_RUN_LIKE``
+    and fall through to unconditional high-risk, same as ``os.system``/
+    ``os.popen``/``os.remove``/``unlink``/``rmdir``/``shutil.rmtree``/
+    ``move``/HTTP verbs/sendmail/open-for-write."""
+    canon, _ = _resolved_sink_name(call, ctx)
+    if canon in _SUBPROCESS_RUN_LIKE:
         return _is_shell_true(call)
-    return _is_mutating_sink_call(call)
+    return _is_mutating_sink_call(call, ctx)
 
 
-def _body_has_mutating_sink(node: ast.AST) -> bool:
+def _body_has_mutating_sink(node: ast.AST, ctx: "_SinkFileCtx | None" = None) -> bool:
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Call) and _is_mutating_sink_call(sub):
+        if isinstance(sub, ast.Call) and _is_mutating_sink_call(sub, ctx):
             return True
     return False
 
 
-def _body_has_high_risk_sink(node: ast.AST) -> bool:
+def _body_has_high_risk_sink(node: ast.AST, ctx: "_SinkFileCtx | None" = None) -> bool:
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Call) and _is_high_risk_sink_call(sub):
+        if isinstance(sub, ast.Call) and _is_high_risk_sink_call(sub, ctx):
             return True
     return False
 
@@ -641,6 +849,12 @@ class ToolScopeCreepDetector(Detector):
             func_index = self._build_function_index_for_file(f)
             import_map = _build_import_map(f, files_by_rel)
             class_methods = _class_methods_in_file(f)
+            # Round-2 N-vote fix (2026-07-23, sink-substring-fix lane):
+            # per-file sink-resolution context (module aliases, direct
+            # stdlib-sink imports, repo-internal bare names) -- see
+            # `_SinkFileCtx`. Per-candidate-file contexts (a one-hop target
+            # in a DIFFERENT file) are built lazily inside `_inspect_body`.
+            f_sink_ctx = _build_sink_file_ctx(f, files_by_rel, local_func_names=set(func_index.keys()))
             for node in ast.walk(f.tree):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
@@ -655,7 +869,7 @@ class ToolScopeCreepDetector(Detector):
                 tool_name = _declared_tool_name(tool_deco, node.name)
                 by_name = bool(_MUTATING_VERB.match(tool_name)) or bool(_MUTATING_VERB.match(node.name))
                 sink_hit, indirect_gate, high_risk_hit = self._inspect_body(
-                    node, f, files_by_rel, import_map, class_methods, func_index
+                    node, f, files_by_rel, import_map, class_methods, func_index, f_sink_ctx
                 )
                 is_mutating = by_name or sink_hit
                 if not is_mutating:
@@ -711,6 +925,13 @@ class ToolScopeCreepDetector(Detector):
         # convention the decorator path in run() now uses for its file too.
         file_func_index = self._build_function_index_for_file(f)
         file_gated_names = self._build_gate_index(file_func_index)
+        # Round-2 N-vote fix (2026-07-23): same-file-only sink-resolution
+        # context (this path stays same-file-only by pre-existing
+        # convention, see _build_function_index_for_file's docstring) --
+        # still resolves module aliases and direct stdlib-sink imports
+        # written in THIS file, and treats this file's own function names
+        # as repo-internal (not raw external calls).
+        file_sink_ctx = _build_sink_file_ctx(f, local_func_names=set(file_func_index.keys()))
         module_gate = _module_level_env_gate(f)
         decorator_src = " ".join(_unparse(d) for d in getattr(handler, "decorator_list", []))
         decorator_gate = bool(_GATE_HINT.search(decorator_src))
@@ -734,7 +955,9 @@ class ToolScopeCreepDetector(Detector):
 
         out: list[Finding] = []
         for tool_name, stmts, _shared in segments:
-            sink_hit, indirect_gate, high_risk_hit = self._inspect_stmts(stmts, file_func_index, file_gated_names)
+            sink_hit, indirect_gate, high_risk_hit = self._inspect_stmts(
+                stmts, file_func_index, file_gated_names, file_sink_ctx
+            )
             by_name = bool(tool_name) and bool(_MUTATING_VERB.match(tool_name))
             is_mutating = by_name or sink_hit
             if not is_mutating:
@@ -781,15 +1004,24 @@ class ToolScopeCreepDetector(Detector):
             ))
         return out
 
-    def _inspect_stmts(self, stmts: list[ast.stmt], func_index: dict, gated_names: set) -> tuple[bool, bool, bool]:
+    def _inspect_stmts(
+        self,
+        stmts: list[ast.stmt],
+        func_index: dict,
+        gated_names: set,
+        sink_ctx: "_SinkFileCtx | None" = None,
+    ) -> tuple[bool, bool, bool]:
         """Same one-hop helper-delegation logic as ``_inspect_body``, scoped
         to a ``dispatch_segments`` branch (a list of statements) instead of a
         single function node. Returns (sink_hit, indirect_gate,
         high_risk_hit) -- ``high_risk_hit`` (round 3, 2026-07-23) mirrors
         ``_inspect_body``'s severity-calibration signal; see
-        ``_is_high_risk_sink_call``."""
-        sink_hit = any(_body_has_mutating_sink(s) for s in stmts)
-        high_risk_hit = any(_body_has_high_risk_sink(s) for s in stmts)
+        ``_is_high_risk_sink_call``. ``sink_ctx`` (round-2 N-vote fix pass)
+        is same-file-only by this path's pre-existing convention, so a
+        single context is reused for both the direct statements and every
+        resolved same-file candidate below."""
+        sink_hit = any(_body_has_mutating_sink(s, sink_ctx) for s in stmts)
+        high_risk_hit = any(_body_has_high_risk_sink(s, sink_ctx) for s in stmts)
         indirect_gate = False
         for stmt in stmts:
             for sub in ast.walk(stmt):
@@ -800,9 +1032,9 @@ class ToolScopeCreepDetector(Detector):
                 if not short or short not in func_index:
                     continue
                 for _cf, cnode in func_index[short]:
-                    if not sink_hit and _body_has_mutating_sink(cnode):
+                    if not sink_hit and _body_has_mutating_sink(cnode, sink_ctx):
                         sink_hit = True
-                    if not high_risk_hit and _body_has_high_risk_sink(cnode):
+                    if not high_risk_hit and _body_has_high_risk_sink(cnode, sink_ctx):
                         high_risk_hit = True
                     if short in gated_names:
                         indirect_gate = True
@@ -965,6 +1197,25 @@ class ToolScopeCreepDetector(Detector):
             return [(cf, cn) for cf, cn in same_file_func_index[short]]
         return None
 
+    def _sink_ctx_for_file(
+        self,
+        cf: SourceFile,
+        files_by_rel: dict[str, SourceFile],
+        cache: dict[str, "_SinkFileCtx"],
+    ) -> "_SinkFileCtx":
+        """Lazily build (and cache) ``cf``'s own sink-resolution context --
+        a one-hop-resolved candidate can live in a DIFFERENT file than the
+        tool being inspected, and bare-name resolution must be evaluated
+        against THAT file's own imports/function definitions, never the
+        original tool's file's context (round-2 N-vote fix)."""
+        cached = cache.get(cf.rel)
+        if cached is not None:
+            return cached
+        local_names = set(self._build_function_index_for_file(cf).keys())
+        built = _build_sink_file_ctx(cf, files_by_rel, local_func_names=local_names)
+        cache[cf.rel] = built
+        return built
+
     def _inspect_body(
         self,
         node: ast.AST,
@@ -973,6 +1224,7 @@ class ToolScopeCreepDetector(Detector):
         import_map: dict[str, tuple[SourceFile, str | None]],
         class_methods: dict[tuple[str, str], ast.AST],
         same_file_func_index: dict,
+        f_sink_ctx: "_SinkFileCtx | None" = None,
     ) -> tuple[bool, bool, bool]:
         """Return (sink_hit, indirect_gate, high_risk_hit) considering one
         hop through any helper function this tool's body plainly calls --
@@ -981,10 +1233,17 @@ class ToolScopeCreepDetector(Detector):
         is a strict subset of ``sink_hit`` used only for severity/confidence
         calibration -- see ``_is_high_risk_sink_call``; it never widens or
         narrows ``sink_hit``/``indirect_gate``, which keep their pre-round-3
-        over-flag-safe semantics unchanged."""
-        sink_hit = _body_has_mutating_sink(node)
-        high_risk_hit = _body_has_high_risk_sink(node)
+        over-flag-safe semantics unchanged. ``f_sink_ctx`` (round-2 N-vote
+        fix pass) resolves ``f``'s own bare/aliased calls; a resolved
+        candidate living in a DIFFERENT file gets its OWN freshly-built
+        context via ``_sink_ctx_for_file``, never ``f``'s -- a bare name is
+        only "repo-internal" relative to the file it's written in."""
+        sink_hit = _body_has_mutating_sink(node, f_sink_ctx)
+        high_risk_hit = _body_has_high_risk_sink(node, f_sink_ctx)
         indirect_gate = False
+        candidate_ctx_cache: dict[str, "_SinkFileCtx"] = {}
+        if f_sink_ctx is not None:
+            candidate_ctx_cache[f.rel] = f_sink_ctx
         for sub in ast.walk(node):
             if not isinstance(sub, ast.Call):
                 continue
@@ -996,8 +1255,14 @@ class ToolScopeCreepDetector(Detector):
             candidates = [(cf, cn) for cf, cn in candidates if cn is not node]
             if not candidates:
                 continue
-            any_sink = any(_body_has_mutating_sink(cn) for _cf, cn in candidates)
-            any_high_risk = any(_body_has_high_risk_sink(cn) for _cf, cn in candidates)
+            any_sink = any(
+                _body_has_mutating_sink(cn, self._sink_ctx_for_file(cf, files_by_rel, candidate_ctx_cache))
+                for cf, cn in candidates
+            )
+            any_high_risk = any(
+                _body_has_high_risk_sink(cn, self._sink_ctx_for_file(cf, files_by_rel, candidate_ctx_cache))
+                for cf, cn in candidates
+            )
             all_gated = all(_node_has_gate(cf, cn) for cf, cn in candidates)
             if any_sink and not sink_hit:
                 sink_hit = True
