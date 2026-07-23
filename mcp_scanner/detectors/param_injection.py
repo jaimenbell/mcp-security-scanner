@@ -87,6 +87,22 @@ _JS_CP_MODULE_BINDING = re.compile(
 
 
 _JS_REGEX_CONTEXT_PRECEDING = set("([{,;:=!&|?+-*%^~<>")
+# Round-3 N-vote P0-C fix: a `/` immediately after one of these KEYWORDS
+# is also a regex-literal context, not just after a symbol -- the
+# original heuristic only checked the last SIGNIFICANT CHARACTER, so
+# `return /^{$/.test(x)` (last char of "return" is alnum, not a symbol)
+# was never recognized as a regex opener at all. Its embedded `{`/`}`
+# then leaked into the brace-based scope walk as if they were real code
+# braces, corrupting (merging/mis-splitting) function-scope spans --
+# live repro (shadow6): two such literals in one file merged spans and
+# masked a real child_process.exec() sink elsewhere in the same file
+# (0 findings). List mirrors common real-world JS-linter regex-context
+# keyword sets.
+_JS_REGEX_CONTEXT_KEYWORDS = {
+    "return", "typeof", "case", "in", "of", "delete", "void", "do",
+    "else", "yield", "await", "instanceof", "new", "throw",
+}
+_JS_WORD_CHAR = re.compile(r"[A-Za-z0-9_$]")
 
 
 def _strip_js_noise(text: str) -> str:
@@ -103,18 +119,34 @@ def _strip_js_noise(text: str) -> str:
     Regex-vs-division is genuinely ambiguous without a real parser; this
     uses the same preceding-token heuristic real-world JS linters use: a
     `/` opens a regex literal when the last significant (non-whitespace,
-    non-blanked) character before it is one of ``([{,;:=!&|?+-*%^~<>`` or
-    there is no such character yet (start of file/statement). An
-    ambiguous or unterminated `/` is left alone (treated as division) --
-    the safe direction: worse case is an unstripped regex body that could
-    still miscount a brace, no different from the pre-fix behavior for
-    that narrow shape, not a new risk."""
+    non-blanked) character before it is one of ``([{,;:=!&|?+-*%^~<>``,
+    there is no such character yet (start of file/statement), OR (round-3
+    N-vote P0-C fix) the last COMPLETE WORD token was a regex-context
+    keyword (``return``, ``typeof``, ``case``, ``in``, ``of``, ``delete``,
+    ``void``, ``do``, ``else``, ``yield``, ``await``, ``instanceof``,
+    ``new``, ``throw``) -- a keyword ends in an alphanumeric character, so
+    the symbol-only check alone could never recognize it. An ambiguous or
+    unterminated `/` is left alone (treated as division) -- the safe
+    direction: worse case is an unstripped regex body that could still
+    miscount a brace, which is now caught by the fail-closed balance check
+    in ``_js_block_spans_by_line`` rather than silently corrupting scope
+    info, no different from the pre-fix behavior for that narrow shape."""
     out: list[str] = []
     i, n = 0, len(text)
     last_sig = ""
+    last_word = ""
+    word_buf: list[str] = []
+
+    def _flush_word():
+        nonlocal last_word
+        if word_buf:
+            last_word = "".join(word_buf).lower()
+            word_buf.clear()
+
     while i < n:
         c = text[i]
         if c == "/" and i + 1 < n and text[i + 1] == "/":
+            _flush_word()
             j = i
             while j < n and text[j] not in "\r\n":
                 j += 1
@@ -122,6 +154,7 @@ def _strip_js_noise(text: str) -> str:
             i = j
             continue
         if c == "/" and i + 1 < n and text[i + 1] == "*":
+            _flush_word()
             j = text.find("*/", i + 2)
             j = n if j == -1 else j + 2
             out.append("".join(ch if ch in "\r\n" else " " for ch in text[i:j]))
@@ -129,6 +162,7 @@ def _strip_js_noise(text: str) -> str:
             last_sig = " "
             continue
         if c in ("'", '"', "`"):
+            _flush_word()
             quote = c
             j = i + 1
             while j < n:
@@ -143,7 +177,11 @@ def _strip_js_noise(text: str) -> str:
             i = j
             last_sig = '"'
             continue
-        if c == "/" and (last_sig == "" or last_sig in _JS_REGEX_CONTEXT_PRECEDING):
+        if c == "/" and (
+            last_sig == ""
+            or last_sig in _JS_REGEX_CONTEXT_PRECEDING
+            or (last_sig.isalnum() and last_word in _JS_REGEX_CONTEXT_KEYWORDS)
+        ):
             j = i + 1
             terminated = False
             while j < n:
@@ -164,31 +202,58 @@ def _strip_js_noise(text: str) -> str:
                 out.append("".join(ch if ch in "\r\n" else " " for ch in seg))
                 i = j
                 last_sig = "/"
+                last_word = ""
                 continue
             # Unterminated on this line -- not actually a regex literal;
             # fall through and treat this `/` as an ordinary character.
         out.append(c)
+        if _JS_WORD_CHAR.match(c):
+            word_buf.append(c)
+        else:
+            _flush_word()
         if not c.isspace():
             last_sig = c
         i += 1
     return "".join(out)
 
 
-def _js_block_spans_by_line(text: str) -> list[tuple[int, int]]:
+def _js_block_spans_by_line(text: str) -> list[tuple[int, int]] | None:
     """(start_line, end_line), 1-indexed inclusive, for every ``{...}``
     block found via brace-depth matching over noise-stripped text (see
     ``_strip_js_noise``). Nested blocks each get their own span; spans are
     otherwise either disjoint or fully nested (a property of matched
-    braces), which is what makes the innermost-span lookup below correct."""
+    braces), which is what makes the innermost-span lookup below correct.
+
+    Round-3 N-vote P0-C fix: FAILS CLOSED. If the braces in this file
+    don't balance (an unmatched ``{`` left open at EOF, or a stray ``}``
+    with nothing to close -- whether from genuinely malformed/truncated
+    source or a regex-literal shape ``_strip_js_noise``'s heuristic still
+    doesn't recognize), this returns ``None`` (a DISTINCT sentinel from
+    the empty list, which means "no braces at all, but reliable") rather
+    than a partial, possibly-corrupted span set. The caller
+    (``_js_bindings_by_scope``) treats ``None`` as "discard every binding
+    in this file" -- NOT "everything is module-scope visible", which
+    would be the wrong direction (it would make a same-named receiver
+    resolve as a RegExp match MORE often, masking a real sink instead of
+    over-flagging it). Every ``.exec(`` receiver then resolves to
+    "unknown" and stays flagged -- over-flag-safe parity, matching the
+    file-wide (pre-scope) fix's behavior, rather than trusting a scope
+    tree that might be silently wrong in a way that masks a real sink."""
     clean = _strip_js_noise(text)
     stack: list[int] = []
     spans: list[tuple[int, int]] = []
+    stray_close = False
     for idx, ch in enumerate(clean):
         if ch == "{":
             stack.append(idx)
-        elif ch == "}" and stack:
-            start = stack.pop()
-            spans.append((clean.count("\n", 0, start) + 1, clean.count("\n", 0, idx) + 1))
+        elif ch == "}":
+            if stack:
+                start = stack.pop()
+                spans.append((clean.count("\n", 0, start) + 1, clean.count("\n", 0, idx) + 1))
+            else:
+                stray_close = True
+    if stack or stray_close:
+        return None
     return spans
 
 
@@ -220,8 +285,16 @@ def _js_bindings_by_scope(text: str) -> list[tuple[str, str, int, int]]:
     "is this name ever a regexp" / "is this name ever a cp module" sets) is
     what stops a local RegExp shadow in one function from leaking into an
     unrelated function's real child_process usage of the same name, and
-    the reverse."""
+    the reverse.
+
+    Round-3 N-vote P0-C fix: if ``_js_block_spans_by_line`` returns
+    ``None`` (brace imbalance detected -- unreliable), this returns an
+    EMPTY bindings list outright, discarding every RegExp/cp_module
+    binding in the file rather than treating them as module-scope-visible
+    (which would be the wrong, mask-a-real-sink direction)."""
     spans = _js_block_spans_by_line(text)
+    if spans is None:
+        return []
     out: list[tuple[str, str, int, int]] = []
     for pat, kind in (
         (_JS_REGEX_VAR_NEW, "regexp"),
