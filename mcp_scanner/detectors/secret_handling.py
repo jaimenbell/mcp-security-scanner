@@ -51,6 +51,69 @@ _TRACKED_SECRET_FILES = (
 )
 _EXAMPLE_ENV = re.compile(r"\.env\.(example|sample|template|dist)$")
 
+# --- Wave-1 FP fix (b): self-signed TEST certificates ----------------------
+# Evidence (staged/ecosystem-scan-2026-07-23): microsoft/playwright-mcp's
+# tests/testserver/cert.pem + key.pem, a self-signed (issuer == subject)
+# throwaway keypair committed purely to stand up a local HTTPS test server
+# -- the common CI pattern, not a real secret leak. Demotion requires BOTH a
+# test-fixture path AND a provable self-signed marker; a cert whose issuer
+# != subject, or any cert outside a test-fixture path, is never demoted on
+# "looks like a cert" alone.
+_TEST_PATH_MARKER = re.compile(
+    r"(^|/)(tests?|__tests__|testdata|test-data|testserver|fixtures?|spec|mocks?)(/|$)",
+    re.IGNORECASE,
+)
+_CERT_SUFFIXES = (".pem", ".crt", ".cer")
+
+
+def _is_test_fixture_path(rel: str) -> bool:
+    return bool(_TEST_PATH_MARKER.search(rel))
+
+
+def _is_self_signed_test_cert(path) -> bool:
+    """True only when ``path`` parses as an X.509 certificate whose issuer
+    equals its subject (the definition of self-signed). Requires the
+    optional ``cryptography`` package; on ImportError, a missing/unreadable
+    file, or any parse error, this returns False -- unknown always stays on
+    the flagged side (over-flag-safe), never demoted on a guess."""
+    try:
+        from cryptography import x509
+    except ImportError:
+        return False
+    try:
+        data = path.read_bytes()
+        cert = x509.load_pem_x509_certificate(data)
+        return cert.issuer == cert.subject
+    except Exception:
+        return False
+
+
+def _looks_like_private_key_pem(path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return "PRIVATE KEY-----" in text
+
+
+def _sibling_self_signed_cert(rel: str, root) -> bool:
+    """Does the same directory as ``rel`` contain a sibling .pem/.crt/.cer
+    file that is itself a provable self-signed cert? Used to extend
+    demotion to a cert's paired PRIVATE KEY file (key.pem next to cert.pem)
+    -- the key itself carries no issuer/subject to check, but a throwaway
+    keypair generated solely for a self-signed local test cert is the same
+    low-risk shape as the cert it belongs to."""
+    try:
+        d = (root / rel).parent
+        if not d.is_dir():
+            return False
+        for sib in d.iterdir():
+            if sib.suffix.lower() in _CERT_SUFFIXES and _is_self_signed_test_cert(sib):
+                return True
+    except OSError:
+        return False
+    return False
+
 # --- JS/TS parity: secret-named value passed to a log call -----------------
 # No AST for JS/TS in this scanner. Line-based, and deliberately restricted
 # to non-string-literal text on the call's argument side, mirroring the
@@ -211,6 +274,8 @@ class SecretHandlingDetector(Detector):
                 continue
             for pat in _TRACKED_SECRET_FILES:
                 if pat.search(rel):
+                    if _is_test_fixture_path(rel) and self._is_demoted_test_cert(rel, ctx.root):
+                        break
                     findings.append(Finding(
                         vuln_class="tracked-secret-file",
                         title=f"Secret-bearing file tracked in git: {rel}",
@@ -233,6 +298,28 @@ class SecretHandlingDetector(Detector):
                 findings.extend(self._scan_js_logging(f))
 
         return findings
+
+    @staticmethod
+    def _is_demoted_test_cert(rel: str, root) -> bool:
+        """Called only after a tracked-secret-file pattern already matched
+        AND the path is a test-fixture path. Returns True when the file is
+        provably a self-signed cert, or a private key paired with one in
+        the same directory -- never on extension/path alone."""
+        low = rel.lower()
+        if low.endswith((".pem", ".crt", ".cer")):
+            abs_path = root / rel
+            if _is_self_signed_test_cert(abs_path):
+                return True
+            # Same extension, but not parseable as a cert -- may be the
+            # paired PRIVATE KEY file (real-world convention: both cert and
+            # key committed as "cert.pem"/"key.pem"). Check for a sibling
+            # self-signed cert instead of trusting the extension alone.
+            if _looks_like_private_key_pem(abs_path):
+                return _sibling_self_signed_cert(rel, root)
+            return False
+        if low.endswith(".key") or rel.endswith("id_rsa"):
+            return _sibling_self_signed_cert(rel, root)
+        return False
 
     def _scan_literals(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
