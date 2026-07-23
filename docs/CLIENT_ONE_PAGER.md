@@ -2,7 +2,7 @@
 title: "MCP Security Scanner -- one-pager"
 type: sales-kit
 audience: client-facing (send as-is or paraphrase on a call)
-version: 2026-07-22
+version: 2026-07-23
 source: "README.md, PRODUCT.md, mcp_scanner/client_report.py"
 tags: [mcp-security-scanner, sales-kit, one-pager]
 ---
@@ -16,13 +16,17 @@ calls. If you don't run an MCP server, this isn't for you yet.
 ## The wedge, in one proof
 
 Most MCP-security vendors ask you to trust a sales deck. This tool ships
-receipts instead: it runs against **six real, in-production MCP servers I
-operate**, reproducibly, via `--self-audit`. It flags the one server an
-independent manual audit found vulnerable (a codegen-injection class in
-`mcp-factory` -- untrusted input rendered through Jinja with autoescape
-off) and gives the other five a clean bill. Anyone can clone the repo,
-point it at their own fleet, and reproduce the same table. That's not a
-claim -- it's `tests/test_self_audit.py`.
+receipts instead: it runs against **eight real, in-production MCP servers I
+operate**, reproducibly, via `--self-audit`. Six get a clean bill. Two
+(`github-mcp`, `discord-mcp`) show a low-confidence P1 -- the scanner
+honestly flagging their own obviously-fake test-fixture tokens rather than
+hiding them, exactly the "demote confidence, never suppress visibility"
+rule the tool is built on. (A codegen-injection class an earlier manual
+audit found in `mcp-factory` was fixed upstream and the fleet now scans
+clean there too -- the detection class itself stays proven against a
+regression fixture.) Anyone can clone the repo, point it at their own
+fleet, and reproduce the same table. That's not a claim -- it's
+`tests/test_self_audit.py`.
 
 ## What it actually checks today
 
