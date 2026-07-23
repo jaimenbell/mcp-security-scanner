@@ -74,6 +74,69 @@ def _declared_tool_name(deco: ast.AST, fallback: str) -> str:
 
 
 # --------------------------------------------------------------------- #
+# Tool registration record
+# --------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ToolRegistration:
+    """One discovered MCP tool registration."""
+
+    name: str                 # declared tool name (or handler name fallback)
+    handler: str              # handler function name ("" for manifest-only / JS-inline)
+    file: str                 # repo-relative posix path of the registration site
+    line: int                 # 1-based line of the registration
+    source: str               # "py-decorator" | "js-regex" | "manifest"
+    node: object | None = None  # the ast.FunctionDef for py-decorator, else None
+
+
+# JS/TS: `server.tool("name", ...)`  /  `foo.tool('name', ...)` / `.tool(` bare
+_JS_TOOL_RE = re.compile(
+    r"\b[\w$]+\.tool\s*\(\s*(?:[\"'`]([^\"'`]+)[\"'`])?",
+)
+# Shared with js_util.JS_SUFFIXES (same set) rather than a private duplicate
+# that could silently drift from it.
+_JS_SUFFIXES = js_util.JS_SUFFIXES
+
+
+def _extract_python(f: SourceFile) -> list[ToolRegistration]:
+    out: list[ToolRegistration] = []
+    if f.tree is None:
+        return out
+    for node in ast.walk(f.tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for deco in node.decorator_list:
+            if _is_tool_decorator(deco):
+                out.append(ToolRegistration(
+                    name=_declared_tool_name(deco, node.name),
+                    handler=node.name,
+                    file=f.rel,
+                    line=node.lineno,
+                    source="py-decorator",
+                    node=node,
+                ))
+                break
+    return out
+
+
+def _extract_js(f: SourceFile) -> list[ToolRegistration]:
+    out: list[ToolRegistration] = []
+    if f.suffix not in _JS_SUFFIXES:
+        return out
+    for i, line in enumerate(f.lines, start=1):
+        m = _JS_TOOL_RE.search(line)
+        if m:
+            out.append(ToolRegistration(
+                name=m.group(1) or "(inline)",
+                handler="",
+                file=f.rel,
+                line=i,
+                source="js-regex",
+                node=None,
+            ))
+    return out
+
+
+# --------------------------------------------------------------------- #
 # Low-level MCP SDK shape (2026-07-23): ``Server()`` + a ``@server.list_tools()``
 # handler returning ``types.Tool(...)`` objects, dispatched via a single
 # ``@server.call_tool()`` function -- distinct from the FastMCP
@@ -177,69 +240,6 @@ def _extract_low_level_sdk(ctx: RepoContext) -> list[ToolRegistration]:
                 line=node.lineno,
                 source="py-lowlevel-sdk",
                 node=handler_node,
-            ))
-    return out
-
-
-# --------------------------------------------------------------------- #
-# Tool registration record
-# --------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class ToolRegistration:
-    """One discovered MCP tool registration."""
-
-    name: str                 # declared tool name (or handler name fallback)
-    handler: str              # handler function name ("" for manifest-only / JS-inline)
-    file: str                 # repo-relative posix path of the registration site
-    line: int                 # 1-based line of the registration
-    source: str               # "py-decorator" | "js-regex" | "manifest"
-    node: object | None = None  # the ast.FunctionDef for py-decorator, else None
-
-
-# JS/TS: `server.tool("name", ...)`  /  `foo.tool('name', ...)` / `.tool(` bare
-_JS_TOOL_RE = re.compile(
-    r"\b[\w$]+\.tool\s*\(\s*(?:[\"'`]([^\"'`]+)[\"'`])?",
-)
-# Shared with js_util.JS_SUFFIXES (same set) rather than a private duplicate
-# that could silently drift from it.
-_JS_SUFFIXES = js_util.JS_SUFFIXES
-
-
-def _extract_python(f: SourceFile) -> list[ToolRegistration]:
-    out: list[ToolRegistration] = []
-    if f.tree is None:
-        return out
-    for node in ast.walk(f.tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for deco in node.decorator_list:
-            if _is_tool_decorator(deco):
-                out.append(ToolRegistration(
-                    name=_declared_tool_name(deco, node.name),
-                    handler=node.name,
-                    file=f.rel,
-                    line=node.lineno,
-                    source="py-decorator",
-                    node=node,
-                ))
-                break
-    return out
-
-
-def _extract_js(f: SourceFile) -> list[ToolRegistration]:
-    out: list[ToolRegistration] = []
-    if f.suffix not in _JS_SUFFIXES:
-        return out
-    for i, line in enumerate(f.lines, start=1):
-        m = _JS_TOOL_RE.search(line)
-        if m:
-            out.append(ToolRegistration(
-                name=m.group(1) or "(inline)",
-                handler="",
-                file=f.rel,
-                line=i,
-                source="js-regex",
-                node=None,
             ))
     return out
 
