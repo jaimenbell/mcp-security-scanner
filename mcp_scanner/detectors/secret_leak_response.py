@@ -7,8 +7,12 @@ protocol — a distinct leak surface: a tool can be perfectly fine about not
 logging a credential and still return it verbatim in its response payload.
 
 This detector walks every ``@mcp.tool()``/``@server.tool()``-decorated
-function's ``return`` expression(s) and flags a leak-shaped value when the
-returned dict/tuple/list/bare-expression includes, at a leaf value position:
+function's ``return`` expression(s), AND (2026-07-23) every low-level MCP SDK
+``@server.call_tool()`` dispatch handler's returns -- both its own top-level
+returns and the returns of a helper function it plainly delegates to (one
+hop, same convention as ``tool_scope_creep.py``'s helper-delegation hop) --
+and flags a leak-shaped value when the returned dict/tuple/list/bare-expression
+includes, at a leaf value position:
 
 * ``os.environ`` itself (the whole environment dumped back to the caller);
 * a whole config/settings object returned wholesale (``return config``,
@@ -27,6 +31,26 @@ secret; ``SECRET_KEY``/``api_key`` still fire), are both imported from
 ``secret_handling.py`` (moved there 2026-07-22 so ``secret_handling.py``'s
 own JS-logging check could reuse the same guard instead of carrying a second,
 weaker copy — see that module for the implementation).
+
+Low-level MCP SDK coverage (2026-07-23): this file used to carry its OWN
+private copy of ``_is_tool_decorator`` and never looked at a low-level SDK
+``@server.call_tool()`` dispatch handler at all, so a repo using ONLY that
+shape (no ``@mcp.tool()`` decorators anywhere) got zero coverage from this
+detector regardless of what its tool responses leaked. Fixed by importing
+the decorator/provenance helpers from ``tool_registry.py`` (one parser, not
+two) and adding ``_scan_low_level_sdk``: for each file gated on
+``_file_imports_mcp`` with exactly one ``@server.call_tool()`` handler (zero
+or ambiguous -> skip, never guess a root — same as ``_extract_low_level_sdk``),
+``tool_registry.dispatch_segments`` splits the handler body into per-tool
+branches; each branch's own returns AND the returns of a one-hop delegated
+helper are inspected. A branch attributable to one specific literal tool
+name (``if name == "x":``) is labeled with that tool; anything else (an
+``in (...)`` branch, the final ``else``, code outside the if/elif chain, or
+no if/elif dispatch shape at all) is labeled as the dispatch handler itself
+— never a guessed tool name. Known boundary, disclosed rather than silently
+left: only a literal ``==`` if/elif walk is recognized as attributable
+dispatch; a dict-keyed dispatch table or ``match``/``case`` statement falls
+back to whole-handler attribution (see ``tool_registry.dispatch_segments``).
 """
 
 from __future__ import annotations
@@ -36,7 +60,14 @@ import re
 
 from ..models import Finding, Severity, Confidence
 from .. import js_util
-from ..tool_registry import extract_tool_registry
+from ..tool_registry import (
+    extract_tool_registry,
+    _is_tool_decorator,
+    _is_call_tool_decorator,
+    _file_imports_mcp,
+    _decorated_in_file,
+    dispatch_segments,
+)
 from .base import Detector, RepoContext, SourceFile
 from .secret_handling import _SECRET_VALUE_PATTERNS, _JS_STRING_LITERAL, _name_looks_secret
 
@@ -125,12 +156,6 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
-def _is_tool_decorator(deco: ast.AST) -> bool:
-    target = deco.func if isinstance(deco, ast.Call) else deco
-    dotted = _dotted(target)
-    return bool(dotted) and dotted.split(".")[-1] == "tool"
-
-
 def _leaf_values(expr: ast.AST) -> list[ast.AST]:
     """The value-position leaves of a returned dict/tuple/list, or the
     expression itself if it isn't one of those containers."""
@@ -160,11 +185,66 @@ def _direct_returns(node: ast.AST):
             yield from _direct_returns(child)
 
 
+def _stmts_direct_returns(stmts: list[ast.stmt]):
+    """Same skip-nested-def/lambda rule as ``_direct_returns``, but starting
+    from a list of statements (a ``dispatch_segments`` branch body) rather
+    than a single function node."""
+    for stmt in stmts:
+        if isinstance(stmt, ast.Return):
+            yield stmt
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        else:
+            yield from _direct_returns(stmt)
+
+
+def _build_function_index(ctx: RepoContext) -> dict:
+    """name -> [(SourceFile, FunctionDef/AsyncFunctionDef), ...] across the
+    whole repo -- same shape as ``tool_scope_creep.py``'s own index, used
+    here for the one-hop helper-delegation lookup a low-level SDK dispatch
+    branch needs (``return _leaky_helper(...)`` -- the leak lives in
+    ``_leaky_helper``'s own return, not in the branch's return expression)."""
+    idx: dict[str, list[tuple[SourceFile, ast.AST]]] = {}
+    for f in ctx.files:
+        if f.tree is None:
+            continue
+        for node in ast.walk(f.tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                idx.setdefault(node.name, []).append((f, node))
+    return idx
+
+
+def _one_hop_dispatched_funcs(
+    stmts: list[ast.stmt], func_index: dict, exclude: ast.AST
+) -> list[tuple[SourceFile, ast.AST]]:
+    """Every helper function this branch/segment plainly calls by name,
+    resolved one hop via ``func_index`` -- no proof the call's return value
+    is literally what gets returned upstream, same over-flag-rather-than-miss
+    convention as ``tool_scope_creep.py``'s one-hop helper resolution."""
+    out: list[tuple[SourceFile, ast.AST]] = []
+    seen: set[int] = set()
+    for stmt in stmts:
+        for sub in ast.walk(stmt):
+            if not isinstance(sub, ast.Call):
+                continue
+            dotted = _dotted(sub.func)
+            short = dotted.split(".")[-1] if dotted else ""
+            if not short or short not in func_index:
+                continue
+            for cf, cnode in func_index[short]:
+                if cnode is exclude or id(cnode) in seen:
+                    continue
+                seen.add(id(cnode))
+                out.append((cf, cnode))
+    return out
+
+
 class SecretLeakResponseDetector(Detector):
     name = "secret-leak-via-tool-response"
 
     def run(self, ctx: RepoContext) -> list[Finding]:
         findings: list[Finding] = []
+        func_index: dict | None = None
         for f in ctx.files:
             if f.tree is None:
                 continue
@@ -176,9 +256,37 @@ class SecretLeakResponseDetector(Detector):
                 for ret in _direct_returns(node):
                     if ret.value is None:
                         continue
-                    findings.extend(self._check_return(f, node, ret))
+                    findings.extend(self._check_return(f, f"Tool '{node.name}'", ret))
+            if _file_imports_mcp(f):
+                if func_index is None:
+                    func_index = _build_function_index(ctx)
+                findings.extend(self._scan_low_level_sdk(f, func_index))
         findings.extend(self._scan_js(ctx))
         return findings
+
+    # --- low-level MCP SDK: call_tool dispatch handler --------------------
+    def _scan_low_level_sdk(self, f: SourceFile, func_index: dict) -> list[Finding]:
+        handlers = _decorated_in_file(f, _is_call_tool_decorator)
+        if len(handlers) != 1:
+            # Zero, or more than one, call_tool handler in this file --
+            # never guess a root (mirrors _extract_low_level_sdk).
+            return []
+        handler = handlers[0]
+        handler_label = f"the '{handler.name}' dispatch handler"
+
+        out: list[Finding] = []
+        for tool_name, stmts in dispatch_segments(handler):
+            label = f"Tool '{tool_name}'" if tool_name else handler_label
+            for ret in _stmts_direct_returns(stmts):
+                if ret.value is None:
+                    continue
+                out.extend(self._check_return(f, label, ret))
+            for cf, cnode in _one_hop_dispatched_funcs(stmts, func_index, handler):
+                for ret in _direct_returns(cnode):
+                    if ret.value is None:
+                        continue
+                    out.extend(self._check_return(cf, label, ret))
+        return out
 
     # --- JS/TS: registration-window return regex (no AST available) ------
     def _scan_js(self, ctx: RepoContext) -> list[Finding]:
@@ -331,7 +439,12 @@ class SecretLeakResponseDetector(Detector):
             "a boolean 'present/absent' or a fixed redaction mask instead.",
         )
 
-    def _check_return(self, f: SourceFile, fn: ast.AST, ret: ast.Return) -> list[Finding]:
+    def _check_return(self, f: SourceFile, label: str, ret: ast.Return) -> list[Finding]:
+        """``label`` is a pre-formatted subject phrase for the finding
+        message -- ``"Tool 'x'"`` for a decorator-registered tool or an
+        unambiguous low-level-SDK dispatch branch, or a dispatch-handler
+        description (e.g. ``"the 'call_tool' dispatch handler"``) when
+        attribution to one specific tool isn't possible (never guessed)."""
         out: list[Finding] = []
         expr = ret.value
         leaves = _leaf_values(expr)
@@ -343,7 +456,7 @@ class SecretLeakResponseDetector(Detector):
                 out.append(self._f(
                     "os.environ returned wholesale from a tool response",
                     Severity.P0, Confidence.HIGH, f, ret.lineno,
-                    f"Tool '{fn.name}' returns `os.environ` (or wraps it) directly in "
+                    f"{label} returns `os.environ` (or wraps it) directly in "
                     "its response — every environment variable, including any "
                     "credential, is sent back to the calling LLM.",
                     "Never return the environment object. Return only the specific, "
@@ -358,7 +471,7 @@ class SecretLeakResponseDetector(Detector):
                     out.append(self._f(
                         "Whole config/settings object dumped into a tool response",
                         Severity.P1, Confidence.MEDIUM, f, ret.lineno,
-                        f"Tool '{fn.name}' returns `{cshort}({arg_name})` — every "
+                        f"{label} returns `{cshort}({arg_name})` — every "
                         "attribute of that object, including any credential field, "
                         "is serialized straight into the tool's response.",
                         "Return an explicit allowlist of non-secret fields instead "
@@ -369,7 +482,7 @@ class SecretLeakResponseDetector(Detector):
                 out.append(self._f(
                     "Whole object __dict__ dumped into a tool response",
                     Severity.P1, Confidence.MEDIUM, f, ret.lineno,
-                    f"Tool '{fn.name}' returns `{_dotted(leaf)}` — every attribute of "
+                    f"{label} returns `{_dotted(leaf)}` — every attribute of "
                     "that object, including any credential field, is serialized "
                     "straight into the tool's response.",
                     "Return an explicit allowlist of non-secret fields instead of "
@@ -380,7 +493,7 @@ class SecretLeakResponseDetector(Detector):
                 out.append(self._f(
                     "Whole config/settings object returned from a tool response",
                     Severity.P1, Confidence.MEDIUM, f, ret.lineno,
-                    f"Tool '{fn.name}' returns `{leaf.id}` directly — if this is a "
+                    f"{label} returns `{leaf.id}` directly — if this is a "
                     "config/settings object it likely carries credential fields "
                     "straight back to the calling LLM.",
                     "Return an explicit allowlist of non-secret fields instead of the "
@@ -388,16 +501,16 @@ class SecretLeakResponseDetector(Detector):
                 ))
                 continue
             if isinstance(leaf, ast.Name) and _name_looks_secret(leaf.id):
-                out.append(self._secret_name_finding(f, fn, ret, leaf.id))
+                out.append(self._secret_name_finding(f, label, ret, leaf.id))
             elif isinstance(leaf, ast.Attribute) and _name_looks_secret(leaf.attr):
-                out.append(self._secret_name_finding(f, fn, ret, _dotted(leaf)))
+                out.append(self._secret_name_finding(f, label, ret, _dotted(leaf)))
             elif isinstance(leaf, ast.Constant) and isinstance(leaf.value, str):
                 for pat, what in _SECRET_VALUE_PATTERNS:
                     if pat.search(leaf.value):
                         out.append(self._f(
                             f"Hardcoded {what} returned from a tool response",
                             Severity.P0, Confidence.HIGH, f, ret.lineno,
-                            f"Tool '{fn.name}' returns a literal that matches the shape "
+                            f"{label} returns a literal that matches the shape "
                             f"of a {what}.",
                             "Never return a literal secret value; source it server-side "
                             "only, never echo it back through the protocol.",
@@ -408,15 +521,15 @@ class SecretLeakResponseDetector(Detector):
         # signal a calling LLM sees).
         for key in keys:
             if isinstance(key, ast.Constant) and isinstance(key.value, str) and _name_looks_secret(key.value):
-                out.append(self._secret_name_finding(f, fn, ret, key.value, via_key=True))
+                out.append(self._secret_name_finding(f, label, ret, key.value, via_key=True))
         return out
 
-    def _secret_name_finding(self, f: SourceFile, fn: ast.AST, ret: ast.Return, name: str, via_key: bool = False) -> Finding:
+    def _secret_name_finding(self, f: SourceFile, label: str, ret: ast.Return, name: str, via_key: bool = False) -> Finding:
         where = f"a response field named '{name}'" if via_key else f"'{name}'"
         return self._f(
             "Secret-named value returned from a tool response",
             Severity.P1, Confidence.MEDIUM, f, ret.lineno,
-            f"Tool '{fn.name}' returns {where}, whose name matches the secret-name "
+            f"{label} returns {where}, whose name matches the secret-name "
             "heuristic (secret/token/password/api-key/private-key/client-secret) — "
             "the calling LLM receives it verbatim in the tool's response.",
             "Never return a credential in a tool's response payload. Return a "

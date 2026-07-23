@@ -51,14 +51,25 @@ import-provenance gate (``_file_imports_mcp``): a file must actually import
 something from the ``mcp`` package before its Server()/list_tools/call_tool/
 Tool() shapes are trusted.
 
-Known gap, disclosed rather than silently left (out of scope for this pass):
-``detectors/tool_scope_creep.py`` only consumes this registry's JS-regex
-entries (``source == "js-regex"``) -- its Python path re-derives decorator
-matches directly via ``_is_tool_decorator`` rather than reading
-``py-decorator``/``py-lowlevel-sdk`` registrations. A repo using ONLY the
-low-level SDK shape therefore gets zero write-tools-on-by-default /
-tool-scope-creep (detector 5) coverage today. Wiring that is a separate,
-future increment.
+2026-07-23 (later same day): the gap above -- ``detectors/tool_scope_creep.py``
+and ``detectors/secret_leak_response.py`` only understood decorator-style
+registration, so a repo using ONLY the low-level SDK shape got zero
+write-tools-on-by-default / tool-scope-creep (detector 5) and zero
+secret-leak-via-tool-response (detector 6) coverage -- is now closed. Both
+detectors treat a provenance-gated (``_file_imports_mcp``) ``@server.call_tool()``
+handler as an inspection root via ``dispatch_segments`` (below): each
+top-level ``if <x> == "name": ... elif <x> == "other": ...`` branch in the
+handler is an unambiguous per-tool effective body; anything not attributable
+to one specific literal tool name (an ``in (...)`` / other comparison, the
+final ``else``, or code outside the if/elif chain entirely) is inspected too
+but attributed to the dispatch handler itself, never guessed at one tool --
+same never-guess-a-root philosophy as ``_extract_low_level_sdk``. Known
+boundary, disclosed rather than silently left: this is a literal-equality
+if/elif walk, not real dataflow -- a dict-keyed dispatch table
+(``_HANDLERS[name](arguments)``), a match/case statement, or a name check
+via a helper function/lookup table is not recognized as attributable dispatch
+and falls back to whole-handler attribution (honest UNKNOWN-style fallback,
+never a wrong per-tool guess).
 """
 
 from __future__ import annotations
@@ -241,6 +252,79 @@ def _decorated_in_file(f: SourceFile, is_match) -> list[ast.AST]:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         and any(is_match(d) for d in n.decorator_list)
     ]
+
+
+# --------------------------------------------------------------------- #
+# Dispatch-branch attribution (2026-07-23): shared by
+# ``detectors/tool_scope_creep.py`` and ``detectors/secret_leak_response.py``
+# so each has ONE parser for "what is a low-level SDK ``call_tool`` handler's
+# per-tool effective body", not two that can drift.
+# --------------------------------------------------------------------- #
+def _string_eq_literal(test: ast.AST) -> str | None:
+    """If ``test`` is ``<expr> == "literal"`` (either operand order) with
+    exactly one comparison operator, return the literal string --
+    otherwise ``None``. Only this exact shape counts as an unambiguous
+    tool-name dispatch discriminant; an ``in (...)`` membership test, a
+    chained comparison, or a non-``Eq`` operator is ambiguous and must not
+    be guessed at (mirrors this module's never-guess-a-root philosophy)."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)):
+        return None
+    left, right = test.left, test.comparators[0]
+    if isinstance(right, ast.Constant) and isinstance(right.value, str):
+        return right.value
+    if isinstance(left, ast.Constant) and isinstance(left.value, str):
+        return left.value
+    return None
+
+
+def dispatch_segments(handler: ast.AST) -> list[tuple[str | None, list[ast.stmt]]]:
+    """Split a low-level SDK ``call_tool`` handler's body into
+    ``(tool_name, stmts)`` segments -- the per-tool "effective body" that
+    ``tool_scope_creep.py`` (mutating-sink/gate inspection) and
+    ``secret_leak_response.py`` (leak-shaped-return inspection) each need,
+    without either re-deriving its own dispatch-branch walk.
+
+    ``tool_name`` is the literal from an unambiguous top-level ``if <x> ==
+    "name":`` / ``elif <x> == "name":`` branch in the handler's OWN body
+    (not nested inside a ``try``/``for``/etc.). ``tool_name`` is ``None``
+    for a segment that cannot be attributed to one specific tool -- a final
+    ``else``, a branch whose test isn't a plain string-equality compare
+    (``in (...)``, multiple names, ...), or code outside the if/elif chain
+    entirely (import-time validation, a shared pre-dispatch auth check,
+    an unrecognized final fallback). Consumers must attribute ``None``
+    segments to the dispatch handler itself, never guess a specific tool --
+    same never-guess-a-root philosophy as ``_extract_low_level_sdk``.
+
+    When the handler's top level has no such if/elif dispatch shape at all
+    (a dict-keyed dispatch table, a ``match``/``case`` statement, or any
+    other shape this walk doesn't recognize), the single segment
+    ``(None, handler.body)`` is returned -- the honest whole-handler
+    fallback, disclosed rather than a wrong per-tool guess.
+    """
+    body = list(getattr(handler, "body", None) or [])
+    dispatch_if = None
+    for stmt in body:
+        if isinstance(stmt, ast.If) and _string_eq_literal(stmt.test) is not None:
+            dispatch_if = stmt
+            break
+    if dispatch_if is None:
+        return [(None, body)]
+
+    segments: list[tuple[str | None, list[ast.stmt]]] = []
+    cur: ast.If = dispatch_if
+    while True:
+        segments.append((_string_eq_literal(cur.test), cur.body))
+        if len(cur.orelse) == 1 and isinstance(cur.orelse[0], ast.If):
+            cur = cur.orelse[0]
+            continue
+        if cur.orelse:
+            segments.append((None, cur.orelse))
+        break
+
+    leftover = [s for s in body if s is not dispatch_if]
+    if leftover:
+        segments.append((None, leftover))
+    return segments
 
 
 def _extract_low_level_sdk(ctx: RepoContext) -> list[ToolRegistration]:

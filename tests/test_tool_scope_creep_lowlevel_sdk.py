@@ -1,0 +1,61 @@
+"""Low-level MCP SDK coverage for detector 5 (tool-scope-creep), 2026-07-23.
+Before this fix, ``tool_scope_creep.py`` only consumed
+``extract_tool_registry``'s ``source == "js-regex"`` entries and re-derived
+its own decorator walk directly -- a repo using ONLY the low-level SDK shape
+(``Server()`` + a single ``@server.call_tool()`` dispatch function) produced
+ZERO findings from this detector regardless of how many ungated mutating
+tools it registered.
+"""
+from mcp_scanner.scanner import scan_repo
+from mcp_scanner.detectors import ToolScopeCreepDetector
+from mcp_scanner.models import Severity, Confidence
+
+
+def _classes(r):
+    return {f.vuln_class for f in r.findings}
+
+
+def test_lowlevel_sdk_one_hop_mutating_tool_flagged(fixtures_dir):
+    result = scan_repo(str(fixtures_dir / "vuln_tool_scope_lowlevel"), [ToolScopeCreepDetector()])
+    assert "tool-scope-creep" in _classes(result)
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    titles = " ".join(f.title for f in hits)
+    assert "delete_file" in titles, f"expected 'delete_file' (one-hop sink) flagged, got: {titles}"
+    assert any(f.severity == Severity.P1 for f in hits)
+    assert any(f.confidence == Confidence.HIGH for f in hits)
+
+
+def test_lowlevel_sdk_direct_branch_mutating_tool_flagged(fixtures_dir):
+    result = scan_repo(str(fixtures_dir / "vuln_tool_scope_lowlevel"), [ToolScopeCreepDetector()])
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    titles = " ".join(f.title for f in hits)
+    assert "run_shell" in titles, f"expected 'run_shell' (direct sink) flagged, got: {titles}"
+
+
+def test_lowlevel_sdk_get_status_branch_not_flagged(fixtures_dir):
+    result = scan_repo(str(fixtures_dir / "vuln_tool_scope_lowlevel"), [ToolScopeCreepDetector()])
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    titles = " ".join(f.title for f in hits)
+    assert "get_status" not in titles
+
+
+def test_lowlevel_sdk_ambiguous_branch_attributed_to_handler_not_a_tool(fixtures_dir):
+    """The `elif name in ('legacy_write', 'legacy_write2')` branch has an
+    ungated mutating sink but is genuinely ambiguous -- must be attributed
+    to the dispatch handler itself, never guessed at one tool name."""
+    result = scan_repo(str(fixtures_dir / "vuln_tool_scope_lowlevel"), [ToolScopeCreepDetector()])
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    ambiguous_hits = [f for f in hits if "legacy_write" not in f.title and "call_tool" in f.title]
+    assert ambiguous_hits, f"expected an unattributed-branch finding, got titles: {[f.title for f in hits]}"
+    for f in ambiguous_hits:
+        assert "legacy_write" not in f.title
+        assert "legacy_write" not in f.detail
+
+
+def test_lowlevel_sdk_shared_pre_dispatch_gate_quiets_all_branches(fixtures_dir):
+    """clean_tool_scope_lowlevel has a shared `if not check_permission(name):
+    raise` guard before the if/elif chain -- every mutating branch in the
+    same handler must be treated as gated."""
+    result = scan_repo(str(fixtures_dir / "clean_tool_scope_lowlevel"), [ToolScopeCreepDetector()])
+    hits = [f for f in result.findings if f.vuln_class == "tool-scope-creep"]
+    assert hits == [], f"shared pre-dispatch gate must quiet every branch, got: {[(f.title, f.file, f.line) for f in hits]}"
