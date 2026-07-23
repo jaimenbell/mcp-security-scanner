@@ -40,8 +40,43 @@ _ALLOWLIST_HINTS = (
 _JS_CHILD_PROCESS_IMPORT = re.compile(
     r"""require\(\s*['"](?:node:)?child_process['"]\s*\)|from\s+['"](?:node:)?child_process['"]"""
 )
-_JS_EXEC_CALL = re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")
 _JS_SPAWN_EXECFILE_CALL = re.compile(r"\b(?:child_process\.)?(?:spawn|execFile)(?:Sync)?\s*\(")
+
+# --- Wave-1 FP fix: RegExp.prototype.exec() vs child_process.exec() ------
+# The original exec-call regex matched bare "exec(Sync)?(" regardless of
+# what came before it -- so `myRegex.exec(str)` (a RegExp match call) was
+# indistinguishable from `child_process.exec(cmd)` whenever the SAME FILE
+# also imported child_process for a real, legitimate use elsewhere (e.g. an
+# execSync call two functions away). Fixed structurally: resolve the call's
+# receiver and demote only when it confidently names a RegExp value.
+_JS_EXEC_RECEIVER = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\.\s*exec(?:Sync)?\s*\(")
+_JS_BARE_EXEC = re.compile(r"(?<![\w$.])exec(?:Sync)?\s*\(")
+_JS_REGEX_LITERAL_EXEC = re.compile(
+    r"""(?<![\w$])/(?:\\.|[^/\\\r\n])+/[a-zA-Z]*\s*\.\s*exec(?:Sync)?\s*\("""
+)
+# Same-file, bounded resolution (mirrors _js_child_process_aliases' own
+# same-file convention): a variable assigned `new RegExp(...)` or a
+# `/pattern/flags` literal is a confidently-resolved RegExp receiver.
+_JS_REGEX_VAR_NEW = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+RegExp\s*\("
+)
+_JS_REGEX_VAR_LITERAL = re.compile(
+    r"""\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/(?:\\.|[^/\\\r\n])+/[a-zA-Z]*\s*(?:;|,|\)|$)"""
+)
+
+
+def _js_regexp_var_names(text: str) -> set[str]:
+    """Variable names in this file assigned a RegExp value (`new
+    RegExp(...)` or a `/pattern/flags` literal) -- same-file only, never a
+    repo-wide guess. Used to tell `myRegex.exec(x)` (RegExp match) apart
+    from `child_process.exec(x)` (shell invocation) when a receiver-blind
+    exec-call regex alone can't."""
+    names: set[str] = set()
+    for m in _JS_REGEX_VAR_NEW.finditer(text):
+        names.add(m.group(1))
+    for m in _JS_REGEX_VAR_LITERAL.finditer(text):
+        names.add(m.group(1))
+    return names
 
 # --- P1d: destructure-aliased child_process bindings ---------------------
 # `const { exec: run } = require('child_process')` (require form) or
@@ -155,6 +190,7 @@ class ParamInjectionDetector(Detector):
         has_child_process = bool(_JS_CHILD_PROCESS_IMPORT.search(text))
         exec_aliases, spawn_aliases = _js_child_process_aliases(text)
         has_child_process = has_child_process or bool(exec_aliases) or bool(spawn_aliases)
+        regexp_vars = _js_regexp_var_names(text)
         has_containment = any(h in text for h in _CONTAINMENT_HINTS)
         has_allowlist = any(h in text for h in _ALLOWLIST_HINTS)
 
@@ -164,7 +200,7 @@ class ParamInjectionDetector(Detector):
             line = js_util.code_part(raw_line)
 
             if has_child_process:
-                if _JS_EXEC_CALL.search(line) or _js_alias_call(line, exec_aliases):
+                if self._js_is_real_exec_call(line, exec_aliases, regexp_vars):
                     out.append(self._f(
                         "shell-injection", "child_process.exec(Sync) invocation",
                         Severity.P1, Confidence.HIGH, f, i,
@@ -251,6 +287,34 @@ class ParamInjectionDetector(Detector):
                         "base directory before opening.",
                     ))
         return out
+
+    @staticmethod
+    def _js_is_real_exec_call(line: str, exec_aliases: set[str], regexp_vars: set[str]) -> bool:
+        """True when this line's exec(Sync)?( call is a real
+        child_process invocation, not a RegExp.prototype.exec() match call
+        wearing the same syntax. Receiver resolution, same-file-bounded:
+
+        - a captured receiver identifier (``NAME.exec(``): flagged unless
+          ``NAME`` resolves to a same-file RegExp variable (and isn't
+          literally ``child_process``, which always stays a real sink);
+        - no receiver at all but an inline regex literal immediately
+          precedes ``.exec(``: demoted;
+        - a genuinely bare call (``exec(cmd)``) or a destructured-alias
+          call: real sink, flagged (unchanged from before this fix);
+        - anything else with a receiver that ISN'T a resolved RegExp var:
+          unresolved -- stays flagged, the over-flag-safe direction.
+        """
+        rec_m = _JS_EXEC_RECEIVER.search(line)
+        if rec_m:
+            receiver = rec_m.group(1)
+            if receiver == "child_process":
+                return True
+            return receiver not in regexp_vars
+        if _JS_REGEX_LITERAL_EXEC.search(line):
+            return False
+        if _JS_BARE_EXEC.search(line) or _js_alias_call(line, exec_aliases):
+            return True
+        return False
 
     def _check_call(
         self, node: ast.Call, f: SourceFile, has_containment: bool, has_allowlist: bool
