@@ -15,6 +15,15 @@ from pathlib import Path
 
 import pytest
 
+# Round-2 N-vote P0-1 fix: this whole file exercises the cryptography-
+# dependent self-signed-cert path. Without a real skip guard, a clean venv
+# installed from ".[dev]" pre-fix would either fail these tests outright
+# (if cryptography wasn't in dev) or silently pass for the wrong reason.
+# cryptography IS now in the dev extra (pyproject.toml) so CI actually
+# exercises this code -- this importorskip only protects a genuinely
+# minimal/non-dev environment from a hard failure.
+pytest.importorskip("cryptography")
+
 from mcp_scanner.detectors import SecretHandlingDetector
 from mcp_scanner.detectors.base import RepoContext
 from mcp_scanner.detectors.secret_handling import (
