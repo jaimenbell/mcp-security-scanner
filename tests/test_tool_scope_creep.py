@@ -52,31 +52,32 @@ def test_gated_tool_quiet_via_one_hop_delegation_same_file(clean_same_file):
     )
 
 
-def test_cross_file_gate_now_over_flags_by_design(clean):
-    """2026-07-23 (closing the README's named follow-up): `clean_tool_scope`
-    models a thin @mcp.tool() wrapper in server.py that delegates to a gated
-    helper in a SEPARATE file, write.py -- previously quiet because the
-    decorator path's func_index/gated_names were built REPO-WIDE by bare
-    short function name. An N-vote refuter proved that same repo-wide index
-    let an unrelated, never-imported, same-named gated helper elsewhere in
-    the repo silence a genuinely UNGATED tool (a false negative on this
-    detector's primary target class). The fix scopes the index same-file-
-    only (matching the low-level SDK path's pre-existing convention), which
-    honestly costs this genuinely-gated-but-cross-file case too: the hop to
-    write.py is no longer followed, so these two tools are now (correctly,
-    per this detector's own accept-over-flag-rather-than-miss philosophy)
-    flagged low-confidence/P2 rather than silently cleared. This pins the
-    new, honest behavior -- it is not a regression."""
-    hits = [f for f in clean.findings if f.vuln_class == "tool-scope-creep"]
-    assert len(hits) == 2, (
-        f"expected both cross-file-delegated tools to now be over-flagged "
-        f"(hop not followed -> gate not visible), got: {clean.findings}"
-    )
-    titles = " ".join(f.title for f in hits)
-    assert "delete_file" in titles and "run_shell" in titles
-    assert all(f.severity == Severity.P2 for f in hits), (
-        "name-only classification (no sink resolvable without the cross-file "
-        f"hop) must stay P2, got: {[f.severity for f in hits]}"
+def test_cross_file_gate_via_explicit_import_stays_quiet(clean):
+    """`clean_tool_scope` models a thin @mcp.tool() wrapper in server.py that
+    delegates via an explicit `from . import write` to a gated helper in a
+    SEPARATE file, write.py. History (2026-07-23, both same day):
+
+      round 1 (closing the README's named follow-up) found this quiet only
+      because the decorator path's func_index/gated_names were built
+      REPO-WIDE by bare short function name -- an N-vote refuter proved that
+      same repo-wide index let an unrelated, never-imported, same-named
+      gated helper elsewhere in the repo silence a genuinely UNGATED tool
+      (false negative). Scoping same-file-only fixed that, but as an
+      interim side effect also stopped following THIS fixture's genuinely
+      gated cross-file hop (temporarily over-flagged, disclosed at the
+      time).
+
+      round 2 (same day, second N-vote pass) added a bounded, one-hop,
+      IMPORT-AWARE resolver: an explicit same-repo import like `from .
+      import write` is followed for gate credit (never a repo-wide guess --
+      exactly one target file, resolved from the import statement itself).
+      This fixture's tools are correctly quiet again -- not a regression
+      back to the original bug, because resolution is import-provenance-
+      gated, not bare-name-matched repo-wide."""
+    assert clean.findings == [], (
+        f"a cross-file gate reached via an explicit, statically-resolvable "
+        f"same-repo import must not be flagged, got: "
+        f"{[(f.vuln_class, f.file, f.line) for f in clean.findings]}"
     )
 
 
