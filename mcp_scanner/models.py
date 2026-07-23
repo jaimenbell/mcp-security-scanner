@@ -187,11 +187,23 @@ class ScanResult:
         return not any(f.severity in (Severity.P0, Severity.P1) for f in self.findings)
 
     def to_dict(self) -> dict:
+        # Assign each finding its stable finding_id (class+file+normalized
+        # title, line-independent -- see finding_identity.py) in emitted
+        # order, so collision suffixes are deterministic.
+        from .finding_identity import assign_finding_ids
+
+        ordered = self.sorted_findings
+        ids = assign_finding_ids([(f.vuln_class, f.file, f.title) for f in ordered])
+        finding_dicts = []
+        for fid, f in zip(ids, ordered):
+            d = f.to_dict()
+            d["finding_id"] = fid
+            finding_dicts.append(d)
         return {
             "target": self.target,
             "files_scanned": self.files_scanned,
             "counts_by_severity": self.counts_by_severity(),
             "clean_bill": self.clean_bill,
-            "findings": [f.to_dict() for f in self.sorted_findings],
+            "findings": finding_dicts,
             "errors": self.errors,
         }
