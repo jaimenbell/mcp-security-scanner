@@ -186,13 +186,6 @@ def _is_call_tool_decorator(deco: ast.AST) -> bool:
     return bool(dotted) and dotted.split(".")[-1] == "call_tool"
 
 
-def _is_list_tools_decorator(deco: ast.AST) -> bool:
-    """True for ``@server.list_tools()`` (low-level MCP SDK tool-list handler)."""
-    target = deco.func if isinstance(deco, ast.Call) else deco
-    dotted = _dotted(target)
-    return bool(dotted) and dotted.split(".")[-1] == "list_tools"
-
-
 def _is_tool_construction(call: ast.Call) -> bool:
     """True for ``types.Tool(...)`` / bare ``Tool(...)`` (the low-level SDK's
     tool-metadata constructor -- data, not a decorator). Callers must ALSO
@@ -256,23 +249,30 @@ def _extract_low_level_sdk(ctx: RepoContext) -> list[ToolRegistration]:
     ``_file_imports_mcp``, and correlate it with a call-graph reachability
     root -- SAME-FILE ONLY.
 
-    2026-07-23 N-vote correction: the original cut rooted every Tool()
-    construction repo-wide to whichever ``@server.call_tool()`` handler a
-    nondeterministic file walk found first -- wrong, and sometimes a
-    confident severity DOWNGRADE, in any repo with more than one low-level
-    dispatcher. Correlation is now scoped to the file the Tool() construction
-    lives in:
+    2026-07-23 N-vote correction (round 2): the original cut rooted every
+    Tool() construction repo-wide to whichever ``@server.call_tool()``
+    handler a nondeterministic file walk found first -- wrong, and sometimes
+    a confident severity DOWNGRADE, in any repo with more than one low-level
+    dispatcher. Correlation was scoped to the file the Tool() construction
+    lives in: exactly one ``@server.call_tool()`` handler in that file is
+    the root; anything else (zero, or more than one) claims no root.
 
-      * exactly one ``@server.call_tool()`` handler in that file -> that is
-        the root (the common, unambiguous case -- rag-mcp's shape, and any
-        multi-file repo where each file owns one dispatcher);
-      * zero call_tool handlers but exactly one ``@server.list_tools()``
-        handler in that file -> fall back to it as the root;
-      * otherwise (zero or MORE THAN ONE candidate in that file) -> no root
-        is claimed. The tool still registers (``has_tools`` stays True --
-        that signal is still correct: a real ``Tool()`` construction was
-        found), but with ``node=None``, which is exactly the pre-patch
-        UNKNOWN behavior for that finding downstream -- never a guess.
+    2026-07-23 round 3 (Opus final-verify BLOCKED finding): round 2 still
+    fell back to a same-file ``@server.list_tools()`` handler as the root
+    when zero ``call_tool`` handlers were found -- semantically wrong.
+    ``list_tools`` returns tool METADATA; it never executes tool logic, so
+    rooting a call-graph walk there is not "the honest UNKNOWN behavior," it
+    MANUFACTURES a bogus root -- reproduced on the common split-module shape
+    (a declaration module with ``Tool(...)`` + ``@server.list_tools()`` and
+    no ``call_tool``, dispatch living in a separate module) where it
+    confidently downgraded a genuinely tool-reachable sink to CLI_ONLY.
+    That fallback is REMOVED: zero ``call_tool`` handlers in a file ->
+    ``handler_node=None``, full stop. ``node=None`` on a ``py-lowlevel-sdk``
+    registration is now also a signal ``reachability.py``/``taint.py`` check
+    explicitly (``unrooted_lowlevel`` / the reachable_ids gate) so a finding
+    elsewhere in the SAME repo that has a valid root can't cause a
+    node=None tool's own findings to be confidently mis-graded either --
+    see ``reachability.grade_result``.
 
     Iteration is over ``sorted(ctx.files, key=rel)`` so output order (and
     which same-file handler is picked when, rarely, more than one exists) is
@@ -286,12 +286,11 @@ def _extract_low_level_sdk(ctx: RepoContext) -> list[ToolRegistration]:
         call_tool_handlers = _decorated_in_file(f, _is_call_tool_decorator)
         if len(call_tool_handlers) == 1:
             handler_node: ast.AST | None = call_tool_handlers[0]
-        elif not call_tool_handlers:
-            list_tools_handlers = _decorated_in_file(f, _is_list_tools_decorator)
-            handler_node = list_tools_handlers[0] if len(list_tools_handlers) == 1 else None
         else:
-            # More than one call_tool dispatcher in this single file --
-            # genuinely ambiguous, never guess.
+            # Zero call_tool handlers (round-3: no list_tools fallback --
+            # list_tools never executes tool logic, so it is not a valid
+            # call-graph root) or more than one candidate in this single
+            # file (genuinely ambiguous) -- never guess.
             handler_node = None
 
         for node in ast.walk(f.tree):
