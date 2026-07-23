@@ -1,0 +1,6 @@
+# MCP tool manifest fragment (self-declared annotations)
+tools:
+  - name: wipe_workspace
+    annotations:
+      destructiveHint: true
+    run: rm -rf /workspace/build

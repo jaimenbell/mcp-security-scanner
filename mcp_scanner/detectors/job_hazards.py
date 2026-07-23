@@ -91,6 +91,50 @@ _FILE_CONFIRM_HINT = re.compile(
     r"(dry[_-]?run|read\s+-p\b|Read-Host\b|\bconfirm|\bapproval\b)", re.IGNORECASE
 )
 
+# --- in-body confirmation-gate idioms (FP-wave-2, 2026-07-23 ecosystem scan) -
+# Some MCP servers/wrappers implement their OWN confirm-before-destroy gate
+# inline rather than via the SDK's -Confirm/--dry-run flag: a REAL control-flow
+# gate (early throw/exit/raise/return-of-nonsuccess) on a boolean param named
+# force/yes/confirm/proceed/acknowledge. Recognise those as an equivalent
+# safety control. CONSERVATIVE BY DESIGN -- the negated param check AND a
+# control-flow exit must both be present and close together (bounded window),
+# so a param merely *existing* is never mistaken for a gate. False-negative
+# risk (missing a real gate -> we keep flagging) is cheaper than false-positive
+# risk (inventing a gate -> we hide a real hazard). The param allowlist
+# excludes 'destructiveHint', so a target's self-declaration can never enter
+# through this suppression path (see the destructiveHint doctrine below).
+_GATE_PARAM = r"(?:confirm|force|yes|proceed|acknowledge|i_am_sure)"
+_GATE_EXIT = (
+    r"(?:throw|raise|die|abort|sys\.exit|exit\s+[1-9]|"
+    r"return\s+(?:[1-9]|false|none|[\"']))"
+)
+_INBODY_CONFIRM_GATE = re.compile(
+    "(?:"
+    + r"if[^\n]{0,10}?(?:-not|!\s*|\bnot\b)[^\n]{0,60}?\b" + _GATE_PARAM + r"\b"
+    + r"[\s\S]{0,120}?\b" + _GATE_EXIT
+    + r"|"
+    + r"if\s+\[\s*-z\s+\"?\$\{?" + _GATE_PARAM + r"[\s\S]{0,120}?\b" + _GATE_EXIT
+    + r"|"
+    + r"are\s+you\s+sure"
+    + ")",
+    re.IGNORECASE,
+)
+
+# --- destructiveHint doctrine (FP-wave-2, 2026-07-23) ------------------------
+# A target declaring the MCP 'destructiveHint: true' annotation is a SELF-
+# declaration: informational only. Doctrine ("our curated judgments may demote;
+# the target's self-declarations only reduce confidence, never visibility"):
+# it may appear as CONTEXT on a finding but must NEVER suppress or downgrade
+# severity/confidence. Implemented as a pure detail-string addendum -- it
+# touches no severity, no confidence, and no suppression branch.
+_DESTRUCTIVE_HINT_DECL = re.compile(r"\bdestructiveHint\b\s*[:=]\s*(?:true|True|1)\b")
+_DESTRUCTIVE_HINT_NOTE = (
+    " Context: this tool self-declares the MCP 'destructiveHint: true' "
+    "annotation. That self-declaration is informational only -- it is recorded "
+    "here as context and does not reduce the severity, confidence, or "
+    "visibility of this finding."
+)
+
 # --- benign-idempotent-register suppressor (backlog #1) ---------------------
 # The fleet's own register_*.ps1 scripts legitimately unregister-then-
 # reregister the SAME task name (idempotent re-registration on every run).
@@ -245,6 +289,7 @@ class JobHazardsDetector(Detector):
     def _destructive(self, f: SourceFile) -> list[Finding]:
         out: list[Finding] = []
         offsets = _line_start_offsets(f.lines)
+        hint_note = _DESTRUCTIVE_HINT_NOTE if _DESTRUCTIVE_HINT_DECL.search(f.text) else ""
         for i, line_text in enumerate(f.lines, start=1):
             if _is_comment_line(line_text, f.suffix):
                 continue
@@ -260,7 +305,8 @@ class JobHazardsDetector(Detector):
                         f"Destructive call ({label}) with confirmation explicitly disabled",
                         Severity.P0, Confidence.HIGH, f, i,
                         f"'{label}' runs with '-Confirm:$false', actively suppressing "
-                        "the built-in confirmation prompt in front of a destructive call.",
+                        "the built-in confirmation prompt in front of a destructive call."
+                        + hint_note,
                         "Remove '-Confirm:$false' (or add an explicit dry-run/prompt "
                         "gate) so a human or an env-flag confirms before this runs.",
                     ))
@@ -269,13 +315,16 @@ class JobHazardsDetector(Detector):
                     break  # gated inline (-WhatIf / --dry-run / -Confirm)
                 if _FILE_CONFIRM_HINT.search(f.text):
                     break  # same-file heuristic: a confirm/dry-run gate exists somewhere
+                if _INBODY_CONFIRM_GATE.search(f.text):
+                    break  # in-body control-flow gate on a force/confirm param (FP-wave-2)
                 out.append(self._f(
                     "job-destructive-no-confirm",
                     f"Destructive call ({label}) with no confirm-before-destroy gate",
                     Severity.P1, Confidence.MEDIUM, f, i,
                     f"'{label}' is a destructive/irreversible call and no dry-run flag, "
                     "confirmation prompt, or env-gated approval was found anywhere in "
-                    "this file.",
+                    "this file."
+                    + hint_note,
                     "Add a dry-run flag, an interactive/approval confirm step, or an "
                     "explicit env-gated opt-in before this call runs.",
                 ))
