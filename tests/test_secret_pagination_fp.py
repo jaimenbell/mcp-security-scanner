@@ -14,14 +14,19 @@ def _classes(r):
 
 
 def test_pagination_field_not_flagged_python():
+    # NAME-based check specifically (title "Secret-named value returned")
+    # -- distinct from the P1-5 value-shape backstop below, which
+    # legitimately DOES flag a resolved literal mentioning these same
+    # variable names in its own finding text.
     r = scan_repo(
         "tests/fixtures/vuln_secret_leak_pagination", [SecretLeakResponseDetector()]
     )
     hits = [
         f for f in r.findings
-        if "next_token" in (f.detail or "") or "'cursor'" in (f.detail or "") or "'next_token'" in (f.detail or "")
+        if f.title == "Secret-named value returned from a tool response"
+        and ("next_token" in f.detail or "cursor" in f.detail)
     ]
-    assert hits == [], f"pagination cursor fields must not flag, got {hits}"
+    assert hits == [], f"pagination cursor fields must not flag by name, got {hits}"
 
 
 def test_real_credential_still_flagged_alongside_pagination_python():
@@ -49,6 +54,53 @@ def test_real_credential_still_flagged_js():
     )
     hits = [f for f in r.findings if "access_token" in (f.detail or "")]
     assert hits, "a real credential field (JS) must still flag alongside a demoted pagination field"
+
+
+def test_jwt_value_under_pagination_name_still_flags_by_shape():
+    # Round-2 N-vote P1-5 repro: pagination-name demotion removed the ONLY
+    # signal for a bearer/JWT-shaped secret assigned to a pagination-named
+    # variable (real JWT under `next_token` went 2 findings -> 0). A
+    # value-shape backstop must catch it independent of the name.
+    r = scan_repo(
+        "tests/fixtures/vuln_secret_leak_pagination", [SecretLeakResponseDetector()]
+    )
+    hits = [f for f in r.findings if "JWT" in (f.title or "") or "JWT" in (f.detail or "")]
+    assert hits, f"a JWT-shaped value under a pagination-named variable must still flag, got {r.findings}"
+
+
+def test_bearer_pattern_does_not_flag_obviously_fake_test_fixture_value():
+    # Live fleet-sweep catch (post P1-5, found during this same round-2
+    # pass): the new Bearer-prefixed backstop pattern flagged github-mcp's
+    # OWN test fixture, "Bearer github_pat_fake_test_token_1234" -- an
+    # obviously-named fake value. Real secrets essentially never spell out
+    # "fake"/"test"/"dummy" as a substring.
+    import ast
+    from mcp_scanner.detectors.base import RepoContext, SourceFile
+    from mcp_scanner.detectors import SecretHandlingDetector
+    from pathlib import Path
+
+    src = 'AUTH_HEADER = "Bearer github_pat_fake_test_token_1234"\n'
+    tree = ast.parse(src)
+    f = SourceFile(path=Path("x.py"), rel="x.py", text=src, tree=tree, lines=src.splitlines())
+    ctx = RepoContext(root=Path("."), files=[f], tracked=set(), is_git=False)
+    findings = SecretHandlingDetector().run(ctx)
+    hits = [fi for fi in findings if fi.vuln_class == "hardcoded-secret"]
+    assert hits == [], f"an obviously-fake Bearer test fixture must not flag, got {hits}"
+
+
+def test_bearer_pattern_still_flags_a_real_looking_token():
+    import ast
+    from mcp_scanner.detectors.base import RepoContext, SourceFile
+    from mcp_scanner.detectors import SecretHandlingDetector
+    from pathlib import Path
+
+    src = 'AUTH_HEADER = "Bearer xK9pQm2vN8rL5wYs3Tz7Ab1Cd4Ef6Gh0Ij9Kl2Mn5Op8Qr1St"\n'
+    tree = ast.parse(src)
+    f = SourceFile(path=Path("x.py"), rel="x.py", text=src, tree=tree, lines=src.splitlines())
+    ctx = RepoContext(root=Path("."), files=[f], tracked=set(), is_git=False)
+    findings = SecretHandlingDetector().run(ctx)
+    hits = [fi for fi in findings if fi.vuln_class == "hardcoded-secret"]
+    assert hits, "a real-looking (non-fake-marked) Bearer token must still flag"
 
 
 def test_secret_in_log_pagination_field_not_flagged():

@@ -26,7 +26,39 @@ _SECRET_VALUE_PATTERNS = [
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key id"),
     (re.compile(r"\bghp_[A-Za-z0-9]{36}\b"), "GitHub personal access token"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "Slack token"),
+    # Round-2 N-vote P1-5 fix: value-shape backstop for name-based
+    # demotions (pagination-cursor-name, etc.) -- a real bearer/JWT-shaped
+    # secret assigned to a demoted name (e.g. `next_token = "eyJ..."`) had
+    # NO other signal to catch it once the name-based check was
+    # correctly suppressed. JWT: three base64url segments; the header
+    # segment realistically starts `eyJ` (base64 of `{"`).
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "JWT-shaped token"),
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b"), "Bearer-prefixed token"),
 ]
+
+# Live fleet-sweep catch (round-2, post P1-5): the Bearer-prefixed pattern
+# alone flagged github-mcp's OWN test fixture --
+# `"Bearer github_pat_fake_test_token_1234"` -- an obviously-named fake
+# value, not a real secret. Unlike AKIA/ghp_/sk-/xox* (precise because
+# their literal PROVIDER PREFIX already narrows them), "Bearer <20+ chars>"
+# and the JWT shape are broad backstop patterns with no such built-in
+# precision, so they get one extra guard: a real high-entropy secret
+# essentially never spells out an English word like "fake"/"test"/"dummy"
+# as a substring of a randomly-generated token; a value that does is
+# almost certainly a deliberately-named test fixture.
+_FAKE_VALUE_MARKERS = re.compile(
+    r"fake|dummy|placeholder|sample|xxxx|demo\b", re.IGNORECASE
+)
+_ENTROPY_GATED_LABELS = {"Bearer-prefixed token", "JWT-shaped token"}
+
+
+def _is_real_secret_value_match(what: str, value: str) -> bool:
+    """Extra precision guard applied ONLY to the newer, broader
+    backstop patterns (see ``_ENTROPY_GATED_LABELS``) -- established,
+    provider-prefixed patterns are unaffected."""
+    if what in _ENTROPY_GATED_LABELS and _FAKE_VALUE_MARKERS.search(value):
+        return False
+    return True
 
 _SECRET_NAME = re.compile(
     r"(secret|token|password|passwd|api[_-]?key|private[_-]?key|client[_-]?secret)",
@@ -522,6 +554,8 @@ class SecretHandlingDetector(Detector):
                 for m in pat.finditer(line):
                     value = m.group(0)
                     if _is_known_placeholder_secret(value):
+                        continue
+                    if not _is_real_secret_value_match(what, value):
                         continue
                     if has_suppress_comment:
                         out.append(Finding(
