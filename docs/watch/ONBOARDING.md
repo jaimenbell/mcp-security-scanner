@@ -45,18 +45,39 @@ Create `.github/workflows/mcp-watch.yml`:
 name: MCP Watch
 on:
   push:
+    branches: [main]
   schedule: [{cron: "0 6 * * 1"}]
 jobs:
   mcp-watch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: jaimenbell/mcp-security-scanner/action@v0.1.0
+      - uses: jaimenbell/mcp-security-scanner/action@b6627d37772987eff978ec6339087337ab36cc33  # v0.1.0 release commit -- swap in whatever SHA you're installing at
 ```
 
-That is the whole integration. Pin the action to a release tag (shown:
-`v0.1.0`); we announce new tags in the monthly digest and you bump when
-ready. Nothing auto-updates underneath you.
+That is the whole integration. Scope `branches:` to your primary branch
+(shown: `main` -- use `master` or whatever yours is). Pin the action to a
+**full commit SHA**, not a tag -- that is the primary, supported pin today
+(matches our own SHA-pinning posture; see Friction #3 in the dogfood notes
+if you're curious why). The example above is the commit the `v0.1.0`
+release corresponds to; re-pin to the SHA you actually want at install
+time by checking the repo's commit history. Once we publish release tags
+you can pin to a tag instead (e.g. `@v0.1.0`) for readability -- we'll
+announce it in the monthly digest when that lands. Nothing auto-updates
+underneath you either way.
+
+### Adding Watch alongside an existing workflow
+
+Most repos already have CI (a `ci.yml` or similar). `mcp-watch.yml` is a
+separate, independent workflow file -- there's no job-name collision and
+GitHub runs both without any wiring between them. The one thing to carry
+over deliberately: scope the `on: push:` trigger to your primary branch
+the same way your existing CI does (`branches: [main]` above, or
+`[master]` if that's your convention) rather than leaving it unscoped.
+An unscoped `on: push` fires on every push to every topic branch, not just
+the branch your existing CI treats as canonical -- which burns more CI
+minutes than most repos' convention would suggest and surprises people
+expecting Watch to behave like their other checks.
 
 ### Action inputs (all optional)
 
@@ -84,23 +105,29 @@ Catch findings before they ever reach CI. Add to your
 ```yaml
 repos:
   - repo: https://github.com/jaimenbell/mcp-security-scanner
-    rev: v0.1.0
+    rev: b6627d37772987eff978ec6339087337ab36cc33  # v0.1.0 release commit -- swap in whatever SHA you're installing at
     hooks:
       - id: mcp-scan
 ```
 
-The hook scans your whole repo locally and blocks a commit that introduces
-a P0/P1 finding. It runs entirely on your machine and transmits nothing.
+Same pinning note as Step 1: `rev:` takes a full commit SHA today (shown:
+the `v0.1.0` release commit); once release tags are published, `rev:
+v0.1.0` works too and we'll say so in the digest. The hook scans your
+whole repo locally and blocks a commit that introduces a P0/P1 finding.
+It runs entirely on your machine and transmits nothing.
 
 ## Step 3 (optional) -- Run the CLI yourself
 
-The scanner installs cleanly from a pinned tag; no PyPI account, no
+The scanner installs cleanly from a pinned commit; no PyPI account, no
 environment variables, no editable install:
 
 ```
-pip install "git+https://github.com/jaimenbell/mcp-security-scanner@v0.1.0"
+pip install "git+https://github.com/jaimenbell/mcp-security-scanner@b6627d37772987eff978ec6339087337ab36cc33"  # v0.1.0 release commit -- re-pin to your target SHA
 mcp-scan path/to/your/mcp-server --fail-on P1
 ```
+
+Once release tags are published, `@v0.1.0` works too -- for now the SHA is
+the supported pin.
 
 Exit code 2 means a finding at/above the threshold; 0 means the gate
 passed. Add `--client-report` for the full narrative report, `--json` for
