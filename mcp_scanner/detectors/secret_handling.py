@@ -65,9 +65,23 @@ _SECRET_NAME = re.compile(
     re.IGNORECASE,
 )
 # Values that are obviously placeholders, not real secrets.
+#
+# Round-2 N-vote P2-6 fix: the top-level alternation group used to open
+# with an EMPTY alternative (``^(|x+|your...``) -- an empty string always
+# satisfies a regex at position 0, so ``.match()`` was unconditionally
+# truthy for ANY input. This silently blinded the entire AST
+# ``NAME = "literal"`` hardcoded-secret-assignment branch below since
+# 2026-07-13 (it never fired, for anything, ever) -- and meant wave-1's
+# own "the placeholder demotion cannot mask a real secret" claim was
+# resting on a branch that was never exercised. Fixed: the empty
+# alternative is removed, and the pattern is applied via ``.fullmatch()``
+# (not ``.match()``) at the call site so a value merely STARTING with a
+# placeholder word (``"testing_a_real_leaked_credential"``) is no longer
+# wrongly treated as a placeholder -- only a value that IS (in full) one
+# of these placeholder shapes is excluded.
 _PLACEHOLDER = re.compile(
-    r"^(|x+|your[_-]?|<.*>|\.\.\.|changeme|placeholder|example|dummy|test|none|null|"
-    r"\$\{.*\}|env\[|os\.environ|getenv)",
+    r"(x+|your[_-]?\w*|<.*>|\.\.\.+|changeme|placeholder|example|dummy|test|none|null|"
+    r"\$\{.*\}|env\[.*\]|os\.environ.*|getenv\(.*\))",
     re.IGNORECASE,
 )
 _LOG_CALLS = ("print", "log.info", "log.debug", "log.warning", "log.error",
@@ -586,29 +600,68 @@ class SecretHandlingDetector(Detector):
                                     "rotate the exposed value, and scrub history.",
                         snippet="<redacted secret line>",
                     ))
-        # AST: NAME = "literal" where NAME looks secret and value looks real
+        # AST: NAME = "literal" where NAME looks secret and value looks
+        # real. Round-2 N-vote P2-6 fix: this branch was DEAD CODE (see
+        # _PLACEHOLDER's docstring above) -- now live, it gets the SAME
+        # two guards _scan_literals already applies: the curated
+        # placeholder list may fully suppress (our own judgment), and a
+        # pragma suppress-comment on the line demotes confidence rather
+        # than dropping the finding (adversarial-mode philosophy, P0-3).
         if f.tree is not None:
             for node in ast.walk(f.tree):
                 if isinstance(node, ast.Assign):
                     val = node.value
                     if not (isinstance(val, ast.Constant) and isinstance(val.value, str)):
                         continue
-                    if _PLACEHOLDER.match(val.value.strip()) or len(val.value.strip()) < 8:
+                    value = val.value.strip()
+                    if _is_known_placeholder_secret(value):
+                        continue
+                    if _PLACEHOLDER.fullmatch(value) or len(value) < 8:
+                        continue
+                    # Live fleet-sweep catch (this branch was dead code
+                    # until this same fix, so it had never been sweep-
+                    # tested before): discord-mcp's OWN test fixture,
+                    # `TEST_TOKEN = "fake-test-token-do-not-use"` --
+                    # obviously fake by its own literal text. Same
+                    # rationale as _is_real_secret_value_match: a real
+                    # secret essentially never spells out "fake"/"test"/
+                    # "dummy" as a substring of its own value.
+                    if _FAKE_VALUE_MARKERS.search(value):
                         continue
                     for tgt in node.targets:
                         nm = _dotted(tgt)
-                        if nm and _SECRET_NAME.search(nm):
+                        if not (nm and _SECRET_NAME.search(nm)):
+                            continue
+                        has_suppress_comment = bool(_SUPPRESS_COMMENT.search(f.line_at(node.lineno)))
+                        if has_suppress_comment:
                             out.append(Finding(
                                 vuln_class="hardcoded-secret",
-                                title=f"Hardcoded secret assigned to '{nm}'",
-                                severity=Severity.P1, confidence=Confidence.MEDIUM,
+                                title=f"Hardcoded secret assigned to '{nm}' (author-suppressed)",
+                                severity=Severity.P1, confidence=Confidence.LOW,
                                 file=f.rel, line=node.lineno,
-                                detail=f"'{nm}' is assigned a non-placeholder string "
-                                       "literal; likely a committed credential.",
-                                remediation="Read from os.environ / a secret store; "
-                                            "rotate and scrub if this was ever real.",
+                                detail=(
+                                    f"'{nm}' is assigned a non-placeholder string literal; "
+                                    "likely a committed credential. The line carries an "
+                                    "author suppress-convention comment, which in "
+                                    "adversarial/third-party scanning cannot be trusted to "
+                                    "fully silence a finding -- confidence demoted instead."
+                                ),
+                                remediation="Verify this is genuinely a placeholder, not a "
+                                            "real credential; if real, rotate immediately.",
                                 snippet="<redacted secret assignment>",
                             ))
+                            continue
+                        out.append(Finding(
+                            vuln_class="hardcoded-secret",
+                            title=f"Hardcoded secret assigned to '{nm}'",
+                            severity=Severity.P1, confidence=Confidence.MEDIUM,
+                            file=f.rel, line=node.lineno,
+                            detail=f"'{nm}' is assigned a non-placeholder string "
+                                   "literal; likely a committed credential.",
+                            remediation="Read from os.environ / a secret store; "
+                                        "rotate and scrub if this was ever real.",
+                            snippet="<redacted secret assignment>",
+                        ))
         return out
 
     def _scan_logging(self, f: SourceFile) -> list[Finding]:
