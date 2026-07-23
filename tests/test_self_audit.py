@@ -17,7 +17,11 @@ import pytest
 from mcp_scanner.cli import FLEET_ROOT_ENV_VAR, get_fleet_root, run_self_audit
 from mcp_scanner.scanner import scan_repo
 
-CLEAN_SERVERS = ["github-mcp", "bus-mcp", "desktop-mcp", "rag-mcp", "discord-mcp"]
+CLEAN_SERVERS = [
+    "github-mcp", "bus-mcp", "desktop-mcp", "rag-mcp", "discord-mcp",
+    "vllm-ops-mcp",  # added wave-1 (2026-07-23): scans clean live, was
+                     # already in cli.py's FLEET_SERVERS but missing here
+]
 
 
 def _fleet_root_or_none():
