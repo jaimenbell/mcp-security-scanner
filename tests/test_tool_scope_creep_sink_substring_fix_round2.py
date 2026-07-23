@@ -169,3 +169,36 @@ def test_dead_lowercase_subprocess_popen_entry_removed():
         "subprocess.popen (lowercase) is not a real callable -- os.popen is "
         "the real one and stays in the set; this dead entry must be removed"
     )
+
+
+# --------------------------------------------------------------------- #
+# Converge-pass P2 perf fix (refuter B2, 2026-07-23): the per-candidate-file
+# _SinkFileCtx cache must be REPO-WIDE (built once in run()), not local to
+# _inspect_body (which runs once per TOOL) -- a shared cross-file helper's
+# context (3 full AST walks to build) must not be rebuilt for every tool
+# that references it. `clean_tool_scope_groups_import` is the ideal existing
+# fixture for this: TWO tools (delete_file_tool, run_shell_tool) both
+# one-hop-delegate to the SAME file, groups/write.py.
+# --------------------------------------------------------------------- #
+def test_shared_cross_file_helper_ctx_built_once_not_per_tool(fixtures_dir, monkeypatch):
+    import mcp_scanner.detectors.tool_scope_creep as tsc_mod
+
+    calls: list[str] = []
+    real_builder = tsc_mod._build_sink_file_ctx
+
+    def counting_builder(f, files_by_rel=None, local_func_names=None):
+        calls.append(f.rel)
+        return real_builder(f, files_by_rel, local_func_names=local_func_names)
+
+    monkeypatch.setattr(tsc_mod, "_build_sink_file_ctx", counting_builder)
+
+    result = scan_repo(str(fixtures_dir / "clean_tool_scope_groups_import"), [ToolScopeCreepDetector()])
+    assert result.findings == []  # sanity: fixture is still quiet (gated)
+
+    write_py_calls = [c for c in calls if c.endswith("groups/write.py") or c.endswith("groups\\write.py")]
+    assert len(write_py_calls) == 1, (
+        f"groups/write.py's _SinkFileCtx must be built exactly ONCE across "
+        f"both tools that reference it (delete_file_tool, run_shell_tool), "
+        f"not once per tool -- got {len(write_py_calls)} builds. Full call "
+        f"log: {calls}"
+    )

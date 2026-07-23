@@ -190,7 +190,13 @@ shell-interpreted by construction, no argv-list form exists), as do
 verbs, sendmail, and open-for-write. A direct (same-body) or one-hop
 ``shell=True`` sink is unchanged at P1/HIGH (see ``vuln_tool_scope``'s
 ``run_shell`` and ``vuln_tool_scope_cross_file_sink_import``'s
-``sync_repo``, both pinned). See
+``sync_repo``, both pinned). Caveat (converge-pass P3, refuter B2): the
+MEDIUM half of this calibration is only visible for a finding reachability
+grades ``unknown``/``unreachable`` -- the scanner's pre-existing
+reachability pass (see ``scanner.py``'s ``grade_result``) raises MEDIUM to
+HIGH for any finding on a directly-reachable MCP tool, which is the common
+case, so in practice this calibration's user-visible signal is almost
+always the severity drop (P1 -> P2) alone. See
 ``tests/test_tool_scope_creep_sink_substring_fix.py`` for all pinned cases
 (benign-named helper stays quiet; a genuinely one-hop-reachable subprocess
 call without ``shell=True`` calibrates to P2; direct/cross-file
@@ -837,6 +843,16 @@ class ToolScopeCreepDetector(Detector):
         # too; round 2 restores them, bounded to explicit same-repo
         # imports only, never a guess).
         files_by_rel: dict[str, SourceFile] = {sf.rel: sf for sf in ctx.files}
+        # Round-2 N-vote fix, converge pass (2026-07-23, P2 perf): repo-wide
+        # cache of per-file _SinkFileCtx, keyed by rel path -- hoisted out of
+        # _inspect_body (which runs once per TOOL) so a cross-file one-hop
+        # candidate's context (3 full AST walks to build) is built ONCE per
+        # scan, not once per tool that happens to reference the same helper
+        # file. Measured 2.5x-5x on many-tools -> shared-helper-file shapes
+        # (N=400 tools, H=1600 helper refs: 2.15s -> 10.65s uncached) --
+        # zero fleet impact today (no fleet repo has this shape yet) but
+        # exactly the profile an ecosystem-wide external-repo scan would hit.
+        sink_ctx_cache: dict[str, "_SinkFileCtx"] = {}
 
         for f in ctx.files:
             if f.tree is None:
@@ -852,9 +868,14 @@ class ToolScopeCreepDetector(Detector):
             # Round-2 N-vote fix (2026-07-23, sink-substring-fix lane):
             # per-file sink-resolution context (module aliases, direct
             # stdlib-sink imports, repo-internal bare names) -- see
-            # `_SinkFileCtx`. Per-candidate-file contexts (a one-hop target
-            # in a DIFFERENT file) are built lazily inside `_inspect_body`.
-            f_sink_ctx = _build_sink_file_ctx(f, files_by_rel, local_func_names=set(func_index.keys()))
+            # `_SinkFileCtx`. Cached into the repo-wide `sink_ctx_cache`
+            # (converge-pass perf fix) so a cross-file one-hop candidate
+            # landing on THIS file, from some other tool's inspection, reuses
+            # it instead of rebuilding.
+            f_sink_ctx = sink_ctx_cache.get(f.rel)
+            if f_sink_ctx is None:
+                f_sink_ctx = _build_sink_file_ctx(f, files_by_rel, local_func_names=set(func_index.keys()))
+                sink_ctx_cache[f.rel] = f_sink_ctx
             for node in ast.walk(f.tree):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
@@ -869,7 +890,7 @@ class ToolScopeCreepDetector(Detector):
                 tool_name = _declared_tool_name(tool_deco, node.name)
                 by_name = bool(_MUTATING_VERB.match(tool_name)) or bool(_MUTATING_VERB.match(node.name))
                 sink_hit, indirect_gate, high_risk_hit = self._inspect_body(
-                    node, f, files_by_rel, import_map, class_methods, func_index, f_sink_ctx
+                    node, f, files_by_rel, import_map, class_methods, func_index, f_sink_ctx, sink_ctx_cache
                 )
                 is_mutating = by_name or sink_hit
                 if not is_mutating:
@@ -1225,6 +1246,7 @@ class ToolScopeCreepDetector(Detector):
         class_methods: dict[tuple[str, str], ast.AST],
         same_file_func_index: dict,
         f_sink_ctx: "_SinkFileCtx | None" = None,
+        sink_ctx_cache: "dict[str, _SinkFileCtx] | None" = None,
     ) -> tuple[bool, bool, bool]:
         """Return (sink_hit, indirect_gate, high_risk_hit) considering one
         hop through any helper function this tool's body plainly calls --
@@ -1237,12 +1259,20 @@ class ToolScopeCreepDetector(Detector):
         fix pass) resolves ``f``'s own bare/aliased calls; a resolved
         candidate living in a DIFFERENT file gets its OWN freshly-built
         context via ``_sink_ctx_for_file``, never ``f``'s -- a bare name is
-        only "repo-internal" relative to the file it's written in."""
+        only "repo-internal" relative to the file it's written in.
+        ``sink_ctx_cache`` (converge-pass perf fix, 2026-07-23) is the
+        REPO-WIDE cache built once in ``run()``, not a fresh per-call
+        dict -- this method runs once per TOOL, so a local cache would
+        rebuild a shared cross-file helper's context (3 full AST walks) for
+        every tool that references it; measured 2.5x-5x on many-tools ->
+        shared-helper shapes. Falls back to a fresh, call-scoped dict only
+        when a caller doesn't pass one (defensive, keeps this method usable
+        standalone -- no current call site omits it)."""
         sink_hit = _body_has_mutating_sink(node, f_sink_ctx)
         high_risk_hit = _body_has_high_risk_sink(node, f_sink_ctx)
         indirect_gate = False
-        candidate_ctx_cache: dict[str, "_SinkFileCtx"] = {}
-        if f_sink_ctx is not None:
+        candidate_ctx_cache: dict[str, "_SinkFileCtx"] = sink_ctx_cache if sink_ctx_cache is not None else {}
+        if f_sink_ctx is not None and f.rel not in candidate_ctx_cache:
             candidate_ctx_cache[f.rel] = f_sink_ctx
         for sub in ast.walk(node):
             if not isinstance(sub, ast.Call):
