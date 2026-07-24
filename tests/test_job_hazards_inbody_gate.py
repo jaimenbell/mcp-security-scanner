@@ -32,6 +32,17 @@ def test_inbody_force_gate_suppresses(fixtures_dir):
     assert hits == [], [f"{f.file}:{f.line} {f.title}" for f in hits]
 
 
+def test_bare_areyousure_phrase_does_not_suppress(fixtures_dir):
+    """FP-wave-2 adjudication regression (2026-07-23): a bare 'are you sure'
+    display string / comment, bound to no param and no control-flow exit, must
+    NOT be mistaken for a confirm-before-destroy gate. A genuinely unguarded
+    destructive call elsewhere in the same file must still be flagged."""
+    r = _run(fixtures_dir, "inbody_gate_bare_phrase")
+    hits = _destructive(r)
+    assert any(f.file.endswith("deploy.sh") for f in hits), \
+        [f"{f.file}:{f.line} {f.title}" for f in hits]
+
+
 def test_param_present_without_gate_still_flags(fixtures_dir):
     r = _run(fixtures_dir, "inbody_gate_paramonly")
     hits = _destructive(r)
