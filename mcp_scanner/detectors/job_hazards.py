@@ -114,11 +114,18 @@ _INBODY_CONFIRM_GATE = re.compile(
     + r"[\s\S]{0,120}?\b" + _GATE_EXIT
     + r"|"
     + r"if\s+\[\s*-z\s+\"?\$\{?" + _GATE_PARAM + r"[\s\S]{0,120}?\b" + _GATE_EXIT
-    + r"|"
-    + r"are\s+you\s+sure"
     + ")",
     re.IGNORECASE,
 )
+# NOTE (FP-wave-2 adjudication, 2026-07-23): a bare `are you sure` alternation
+# was removed here. Unlike the two structural alternatives above (which require a
+# negated boolean param AND a control-flow exit close together), a naked phrase
+# match binds to no param and no control flow -- it "invents a gate" from
+# unrelated display copy or a comment anywhere in the file (whole-file
+# .search(f.text)), suppressing genuine unguarded destructive calls. That
+# contradicts this regex's own conservative contract and a security scanner's
+# honesty guarantee. Regression fixtures: tests/test_job_hazards_inbody_gate.py
+# ::test_bare_areyousure_phrase_does_not_suppress.
 
 # --- destructiveHint doctrine (FP-wave-2, 2026-07-23) ------------------------
 # A target declaring the MCP 'destructiveHint: true' annotation is a SELF-
