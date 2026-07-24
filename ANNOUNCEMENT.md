@@ -110,9 +110,10 @@ python -m mcp_scanner.cli --self-audit
 - **Not a SaaS.** It's a CLI you run locally or wire into CI
   (`--fail-on P1`). No hosted service exists today.
 
-346 tests total (`python -m pytest -q`) — 337 pass by default, 9 fleet
+439 tests total (`python -m pytest -q`) — 430 pass by default, 9 fleet
 self-audit tests skip without `MCP_SCANNER_FLEET_ROOT` set. Covers matched
 vuln/clean fixture pairs per detector, the self-audit proof above, the
-8-section client-report renderer, and a paired regression test for every
-demotion (a real secret/exec in the same shape must still flag).
-(Live-reverified 2026-07-23.)
+8-section client-report renderer, the `mcp-scan ecosystem-scan` v2 pipeline,
+and a paired regression test for every demotion (a real secret/exec in the
+same shape must still flag).
+(Live-reverified 2026-07-24.)
