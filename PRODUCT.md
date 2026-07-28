@@ -2,7 +2,7 @@
 title: "MCP Security Scanning — Service Offering"
 type: product-sketch
 status: prototype-stage
-grounded_in: "[[2026-07-12 Discovery — New Revenue Streams (Fable)]]"
+grounded_in: "2026-07-12 internal revenue-streams discovery"
 ---
 
 # MCP Security Scanning — service sketch
