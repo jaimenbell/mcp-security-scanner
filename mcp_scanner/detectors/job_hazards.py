@@ -127,6 +127,61 @@ _INBODY_CONFIRM_GATE = re.compile(
 # honesty guarantee. Regression fixtures: tests/test_job_hazards_inbody_gate.py
 # ::test_bare_areyousure_phrase_does_not_suppress.
 
+# --- build-artifact demotion (2026-07-29 measurement, class iv) -------------
+# airtable-mcp-server's `build-mcpb.sh` produced 2 P1s: `rm -rf node_modules`
+# (before `npm ci --omit=dev`) and `rm -rf airtable-mcp-server.mcpb` (its own
+# output), both under `set -euo pipefail`. Deleting a regenerable build
+# artifact is what a build script IS; at P1 it outranked real findings.
+#
+# SCOPE SHIPS WITH THE PATTERN. Only the `rm -rf`/`rm -fr` labels, and only
+# when EVERY target on the line is a curated exact-match name or archive
+# suffix. One unrecognised target -- a variable, an absolute path, a home-dir
+# reference -- and the line keeps full severity. No globs, no prefix matching,
+# no "looks like a build dir": those are how a carve-out grows to swallow the
+# thing it was meant to leave alone.
+_RM_LABELS = frozenset({"rm -rf", "rm -fr"})
+_BUILD_ARTIFACT_NAMES = frozenset({
+    "node_modules", "dist", "build", "out", "bin", "obj", "target",
+    ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".cache",
+    "coverage", "htmlcov", "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", ".tox", ".venv", "venv", ".eggs",
+})
+_BUILD_ARTIFACT_SUFFIXES = (
+    ".egg-info", ".mcpb", ".zip", ".tgz", ".tar.gz", ".whl", ".vsix", ".dmg",
+)
+# Flags/redirections that are not targets. Anything else on the line IS one.
+_RM_FLAG = re.compile(r"^-{1,2}[A-Za-z-]*$")
+_RM_TARGETS = re.compile(r"\brm\s+-[a-z]+\s+(.*)$", re.IGNORECASE)
+
+
+def _only_build_artifact_targets(code_line: str) -> bool:
+    """True iff every ``rm -rf`` target on the line is a curated artifact.
+
+    Fails CLOSED: no targets, an unparsed line, a variable, a quoted path, or
+    any single unrecognised entry all return False, leaving the finding at its
+    original severity.
+    """
+    m = _RM_TARGETS.search(code_line)
+    if not m:
+        return False
+    # Stop at a shell separator -- only this command's own targets count.
+    rest = re.split(r"[;&|]|>>?", m.group(1))[0]
+    targets = [t for t in rest.split() if not _RM_FLAG.match(t)]
+    if not targets:
+        return False
+    for raw in targets:
+        t = raw.strip("\"'").rstrip("/")
+        if not t or "$" in t or "~" in t or t.startswith("/") or "*" in t:
+            return False  # variable, home-relative, absolute, or a glob
+        base = t.rsplit("/", 1)[-1]
+        if base in _BUILD_ARTIFACT_NAMES:
+            continue
+        if any(base.endswith(sfx) for sfx in _BUILD_ARTIFACT_SUFFIXES):
+            continue
+        return False
+    return True
+
+
 # --- destructiveHint doctrine (FP-wave-2, 2026-07-23) ------------------------
 # A target declaring the MCP 'destructiveHint: true' annotation is a SELF-
 # declaration: informational only. Doctrine ("our curated judgments may demote;
@@ -324,6 +379,30 @@ class JobHazardsDetector(Detector):
                     break  # same-file heuristic: a confirm/dry-run gate exists somewhere
                 if _INBODY_CONFIRM_GATE.search(f.text):
                     break  # in-body control-flow gate on a force/confirm param (FP-wave-2)
+                # Build-artifact demotion (2026-07-29 measurement, class iv):
+                # `rm -rf node_modules` / `rm -rf dist` / `rm -rf *.mcpb` is
+                # the normal shape of a build script, not an irreversible-ops
+                # hazard, and at P1 it outranked real findings. Demoted and
+                # tagged -- never dropped. Requires EVERY target on the line to
+                # be curated; see `_only_build_artifact_targets`.
+                if label in _RM_LABELS and _only_build_artifact_targets(code_line):
+                    out.append(self._f(
+                        "job-destructive-no-confirm",
+                        f"Destructive call ({label}) on build artifacts only "
+                        "(build-artifact)",
+                        Severity.P3, Confidence.LOW, f, i,
+                        f"'{label}' deletes only regenerable build artifacts "
+                        "(every target on this line is a curated build "
+                        "directory or build-output archive), which is the "
+                        "normal shape of a build/clean step rather than an "
+                        "irreversible-destruction hazard. Demoted, not dropped: "
+                        "verify the target list is what you expect."
+                        + hint_note,
+                        "No action needed if these are genuinely build outputs. "
+                        "If any target can hold source or user data, add a "
+                        "dry-run flag or an explicit confirm gate.",
+                    ))
+                    break
                 out.append(self._f(
                     "job-destructive-no-confirm",
                     f"Destructive call ({label}) with no confirm-before-destroy gate",
