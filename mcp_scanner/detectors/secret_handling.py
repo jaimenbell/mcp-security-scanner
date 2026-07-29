@@ -80,6 +80,55 @@ def _name_has_mock_marker(name: str) -> bool:
     return bool(set(_name_words(name)) & _MOCK_NAME_WORDS)
 
 
+# --- Non-credential SHAPE co-signal (2026-07-29 measurement, class iii) -----
+# 13 of 58 false positives on five third-party MCP servers were the
+# "Bearer-prefixed token" pattern matching synthetic fixtures:
+# `Bearer fco_other_resource_token`, `Bearer fc-invalid-credential`,
+# `Bearer ntn_per_request_token`. `Bearer` is by far the weakest of the seven
+# value patterns -- `\bBearer\s+[A-Za-z0-9._~+/=-]{20,}` matches ANY 20+ char
+# run, an English word-phrase included -- whereas a real bearer token is
+# high-entropy.
+#
+# This is OUR OWN curated shape judgment about OUR OWN weakest regex (same
+# category as `_is_pagination_cursor_name`), but it is deliberately NOT a
+# suppressor: it is offered to `_compose_demotion` as a PATH CO-SIGNAL, so it
+# demotes only when PAIRED with a test-fixture path, and never on its own. A
+# word-shaped bearer literal in production source keeps its base confidence.
+#
+# Applied uniformly to every value pattern rather than special-cased to
+# Bearer -- a per-pattern carve-out is exactly how a rule's scope drifts. It
+# is inert for the other six by construction: AKIA/ghp_/xox/JWT/sk- values
+# carry digits, mixed case or dots, and a PRIVATE KEY header is uppercase.
+_SEPARATOR_RUN = re.compile(r"[A-Za-z0-9]+")
+_BEARER_PREFIX = re.compile(r"^bearer\s+", re.IGNORECASE)
+_MAX_WORD_LEN = 15  # no English word in a fixture name runs longer
+
+
+def _is_non_credential_shape(value: str) -> bool:
+    """True when ``value`` reads as a lowercase word-phrase rather than a
+    credential: separator-joined, all lowercase, every segment purely
+    alphabetic and word-length.
+
+    Every clause is load-bearing:
+    * at least one ``_``/``-``     -- a separator-free run (``abcdef...``) may
+                                     well be a real token, so it is excluded.
+    * no uppercase                -- keeps ``-----BEGIN RSA PRIVATE KEY-----``
+                                     and mixed-case tokens out.
+    * every segment alphabetic    -- any digit anywhere means it is not words.
+    * every segment <= 15 chars   -- a long opaque run is not a word.
+    * at least 2 segments         -- one word is not a phrase.
+    """
+    token = _BEARER_PREFIX.sub("", value.strip(), count=1)
+    if "_" not in token and "-" not in token:
+        return False
+    if any(c.isupper() for c in token):
+        return False
+    segments = _SEPARATOR_RUN.findall(token)
+    if len(segments) < 2:
+        return False
+    return all(s.isalpha() and len(s) <= _MAX_WORD_LEN for s in segments)
+
+
 def _has_fake_marker(value: str) -> bool:
     """True when ``value`` contains an explicit fake/dummy/placeholder/
     sample/demo/test marker as a genuine WHOLE WORD, tokenized the same
@@ -733,21 +782,36 @@ class SecretHandlingDetector(Detector):
                     value = m.group(0)
                     if _is_known_placeholder_secret(value):
                         continue
-                    # Value-shape branch: NO path co-signal is offered here on
-                    # purpose. A genuine value-shaped secret must never be
-                    # demoted on the bare path (refuter-B) -- so it demotes only
-                    # on a standalone signal (author-suppressed / fake-marker,
-                    # the latter self-limiting), and `test-path` can only tag a
-                    # finding those already demoted.
+                    # Value-shape branch. The path still never demotes ALONE
+                    # (refuter-B's invariant: a genuine AKIA/ghp_/sk-/JWT/
+                    # private-key value keeps its base confidence in ANY
+                    # directory). What it may now pair with is a
+                    # NON-CREDENTIAL SHAPE co-signal -- see
+                    # `_is_non_credential_shape`: a lowercase, separator-joined
+                    # word-phrase such as `fco_other_resource_token`, which the
+                    # weak `Bearer` pattern matches but which cannot plausibly
+                    # BE a high-entropy bearer token. Two independent signals,
+                    # the same multi-signal bar the cert-path precedent set.
+                    non_cred_shape = _is_non_credential_shape(value)
                     confidence, tag_suffix = _compose_demotion(
                         [
                             (has_suppress_comment, "author-suppressed"),
                             (_has_fake_marker(value), "fake-marker"),
                         ],
                         is_test_path=is_test_path,
+                        path_cosignals=[(non_cred_shape, "non-credential-shape")],
                     )
                     detail = f"A {what} appears as a literal in tracked source."
-                    if "test-path" in tag_suffix:
+                    if "non-credential-shape" in tag_suffix:
+                        detail += (
+                            " The matched value is a lowercase, separator-joined "
+                            "word-phrase rather than a high-entropy credential, "
+                            "AND the file sits at a test-fixture path -- two "
+                            "corroborating signals, so this finding is demoted "
+                            "(never dropped). A real high-entropy value on the "
+                            "same path would keep its base confidence."
+                        )
+                    elif "test-path" in tag_suffix:
                         detail += (
                             " The file also sits at a test-fixture path -- noted "
                             "as context on an ALREADY-demoted finding; the bare "
@@ -784,7 +848,14 @@ class SecretHandlingDetector(Detector):
                         detail=detail,
                         remediation="Move to an environment variable / secret store, "
                                     "rotate the exposed value, and scrub history.",
-                        snippet="<redacted secret line>",
+                        # Honest redaction (2026-07-29). A bare
+                        # "<redacted secret line>" gave a report reader no way
+                        # to tell a synthetic fixture from a live credential --
+                        # the aggravating factor called out in the measurement,
+                        # where 13 fake tokens were indistinguishable from real
+                        # ones without opening the repo. The demotion REASONS
+                        # are surfaced; the value itself still never is.
+                        snippet=f"<redacted secret line{tag_suffix}>",
                     ))
         # AST: NAME = "literal" where NAME looks secret and value looks
         # real. Round-2 N-vote P2-6 fix: this branch was DEAD CODE (see
@@ -892,7 +963,9 @@ class SecretHandlingDetector(Detector):
                             detail=detail,
                             remediation="Read from os.environ / a secret store; "
                                         "rotate and scrub if this was ever real.",
-                            snippet="<redacted secret assignment>",
+                            # Same honest-redaction change as the value-shape
+                            # branch above: reasons surfaced, value never.
+                            snippet=f"<redacted secret assignment{tag_suffix}>",
                         ))
         return out
 
