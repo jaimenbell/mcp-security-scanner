@@ -42,7 +42,22 @@ from dataclasses import replace
 
 from .detectors.base import RepoContext, SourceFile
 from .models import Confidence, Finding, Reachability, ScanResult
+from .test_paths import is_test_path
 from .tool_registry import _dotted, extract_tool_registry
+
+
+# Evidence attached to the path-shape CLI_ONLY fallback (see ``_grade_one``).
+# Deliberately verbose: this grade rests on the WEAKEST evidence this module
+# produces, and the report must say so rather than let a reader mistake it
+# for a call-graph result.
+_TEST_PATH_EVIDENCE = (
+    "file sits at a test/spec/fixture path, so this code is a test harness "
+    "rather than a registered MCP tool entrypoint -- the same non-tool-caller "
+    "category the Python call-graph pass already grades CLI_ONLY. Evidence is "
+    "PATH SHAPE ONLY: no call-graph was available for this file, so this is "
+    "weaker than a call-graph-derived grade and is never allowed to override "
+    "one."
+)
 
 
 # --------------------------------------------------------------------- #
@@ -255,6 +270,34 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
 
 
 def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
+               reachable_ids: set[int], has_tools: bool,
+               have_py_handlers: bool, unrooted_lowlevel: bool = False) -> tuple[Reachability, str]:
+    """Call-graph grade first; path-shape fallback only where it said UNKNOWN.
+
+    STRICT ORDERING (2026-07-29, and the point of the split): ``_grade_ast``
+    is consulted first and its answer is final whenever it decided anything.
+    The path-shape fallback below is the weakest evidence this module has and
+    must never outrank the strongest -- a sink proven REACHABLE from a tool
+    root does not stop being reachable because its file is named
+    ``*.test.py``.
+    """
+    label, evidence = _grade_ast(f, ctx, cg, reachable_ids, has_tools,
+                                 have_py_handlers, unrooted_lowlevel)
+    if label is not Reachability.UNKNOWN:
+        return label, evidence
+    # Nothing decidable from the call-graph -- for a non-Python surface that
+    # is EVERY finding, which is how ~30 of the 58 false positives in the
+    # 2026-07-29 measurement were test-harness code presented as production
+    # attack surface. ``Reachability.CLI_ONLY``'s own definition already
+    # names "a test file" as a non-tool entrypoint, so this reuses that grade
+    # (and with it the existing confidence nudge and --fail-on exclusion)
+    # rather than inventing a parallel mechanism.
+    if is_test_path(f.file):
+        return Reachability.CLI_ONLY, _TEST_PATH_EVIDENCE
+    return Reachability.UNKNOWN, ""
+
+
+def _grade_ast(f: Finding, ctx: RepoContext, cg: CallGraph,
                reachable_ids: set[int], has_tools: bool,
                have_py_handlers: bool, unrooted_lowlevel: bool = False) -> tuple[Reachability, str]:
     if not has_tools:
