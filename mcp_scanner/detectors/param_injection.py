@@ -393,7 +393,17 @@ def _js_alias_call(line: str, names: set[str]) -> bool:
     pat = re.compile(r"\b(?:" + "|".join(re.escape(n) for n in names) + r")\s*\(")
     return bool(pat.search(line))
 _JS_SHELL_TRUE = re.compile(r"shell\s*:\s*true", re.IGNORECASE)
-_JS_EVAL_CALL = re.compile(r"\beval\s*\(")
+# `\b` matches after a '.', so the old `\beval\s*\(` read EVERY `.eval(`
+# method call as the JavaScript global. The 2026-07-29 measurement's only four
+# P0s were all node-redis `redis.eval(LUA_SCRIPT, {keys, arguments})` -- Redis
+# server-side Lua with a module-level const script and parameterized keys/args,
+# not JS eval at all. `(?<![\w$.])` is the same lookbehind `_JS_BARE_EXEC`
+# above already uses for the identical problem on `exec`, and it also covers
+# optional chaining (`redis?.eval(`), where the preceding char is still '.'.
+# Accepted, stated false negative: `window.eval(...)` / `globalThis.eval(...)`
+# no longer match either -- re-admitting any `X.eval(` would re-admit
+# `redis.eval(` with it, and the global form is overwhelmingly the one written.
+_JS_EVAL_CALL = re.compile(r"(?<![\w$.])eval\s*\(")
 _JS_NEW_FUNCTION = re.compile(r"\bnew\s+Function\s*\(")
 _JS_YAML_LOAD = re.compile(r"\byaml\.load\s*\(")
 _JS_YAML_SAFE_SCHEMA = re.compile(r"JSON_SCHEMA|SAFE_SCHEMA|FAILSAFE_SCHEMA")
