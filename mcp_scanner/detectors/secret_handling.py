@@ -641,6 +641,114 @@ def _name_looks_secret(name: str) -> bool:
     return True
 
 
+# --- Terminal-segment rule for logged member chains (2026-07-29, class v) ---
+# What reaches a log is the TERMINAL of a member chain, not its root object.
+# neon `app/api/[transport]/route.ts:958`:
+#     logger.info('OAuth token found', { clientId: token.client.id });
+# logs an OAuth *client id* -- public by design -- yet fired because every
+# identifier in the argument was checked independently, so the root `token`
+# matched. Judging the terminal (`id`) instead is what fixes it.
+#
+# THE CURATED RECOVERY: a terminal that is a GENERIC VALUE ACCESSOR carries no
+# information of its own, so the PARENT segment is judged instead -- otherwise
+# `secret.value` / `token.raw` would go silent, a real leak. `id` is
+# deliberately NOT in this set: `token.id` is an identifier, not the secret,
+# and admitting it would re-open the measured false positive.
+_GENERIC_VALUE_ACCESSORS = frozenset({
+    "value", "val", "raw", "plain", "plaintext", "text", "string", "str",
+    "contents", "content", "data", "payload",
+})
+
+
+# A JS member chain: identifiers joined by '.' or optional-chaining '?.'.
+# `_IDENT` alone (used before 2026-07-29) flattened these into independent
+# tokens, which is what let a chain's ROOT decide the finding.
+_JS_MEMBER_CHAIN = re.compile(
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\??\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*"
+)
+# `redactToken(x)` / `maskSecret(x)` -- a wrapper whose NAME claims redaction.
+# Recorded as report context only; never a suppressor (target-controlled).
+_JS_REDACTION_WRAPPER = re.compile(
+    r"\b([A-Za-z_$][A-Za-z0-9_$]*(?:redact|mask|sanitiz|sanitis|scrub|obfuscat)"
+    r"[A-Za-z0-9_$]*|(?:redact|mask|sanitiz|sanitis|scrub|obfuscat)"
+    r"[A-Za-z0-9_$]*)\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _js_member_chains(code: str) -> list[list[str]]:
+    """Every member chain in ``code``, each as a list of segments."""
+    out: list[list[str]] = []
+    for m in _JS_MEMBER_CHAIN.finditer(code):
+        segs = [s.strip() for s in re.split(r"\??\.", m.group(0))]
+        out.append([s for s in segs if s])
+    return out
+
+
+def _js_redaction_wrapper(code: str) -> str:
+    m = _JS_REDACTION_WRAPPER.search(code)
+    return m.group(1) if m else ""
+
+
+def _py_member_chains(node: ast.AST) -> list[list[str]]:
+    """Every member chain reachable from a logged Python expression.
+
+    An ``Attribute`` chain yields ONE chain (``token.client.id`` ->
+    ``["token", "client", "id"]``) rather than one entry per segment, which is
+    what lets ``_chain_is_secret`` judge the terminal. Composite expressions
+    (f-strings, concatenation, containers, subscripts, comparisons) are
+    recursed into, and so are CALL ARGUMENTS -- ``len(api_key)`` and
+    ``str(token)`` still fire, deliberately: declining to would mean trusting
+    an arbitrary wrapper to be non-leaking, the same target-controlled trust
+    the JS redaction-wrapper case refuses.
+    """
+    out: list[list[str]] = []
+
+    def walk(n: ast.AST) -> None:
+        if isinstance(n, ast.Attribute):
+            segs: list[str] = []
+            cur: ast.AST = n
+            while isinstance(cur, ast.Attribute):
+                segs.append(cur.attr)
+                cur = cur.value
+            if isinstance(cur, ast.Name):
+                segs.append(cur.id)
+                out.append(list(reversed(segs)))
+            else:
+                # Root is not a plain name (a call, subscript, literal...):
+                # keep the attribute chain we can see and recurse into the
+                # root so nothing is lost.
+                out.append(list(reversed(segs)))
+                walk(cur)
+            return
+        if isinstance(n, ast.Name):
+            out.append([n.id])
+            return
+        for child in ast.iter_child_nodes(n):
+            walk(child)
+
+    walk(node)
+    return out
+
+
+def _chain_is_secret(segments: list[str]) -> bool:
+    """Decide a member chain by its terminal, with the accessor recovery.
+
+    ``segments`` is the chain outermost-last, e.g. ``token.client.id`` ->
+    ``["token", "client", "id"]``. Shared by the Python AST path and the JS
+    line-based path so the rule cannot be implemented in one and not the
+    other.
+    """
+    if not segments:
+        return False
+    terminal = segments[-1]
+    if _name_looks_secret(terminal):
+        return True
+    if terminal.lower() in _GENERIC_VALUE_ACCESSORS and len(segments) >= 2:
+        return _name_looks_secret(segments[-2])
+    return False
+
+
 def _dotted(node: ast.AST) -> str:
     if isinstance(node, ast.Attribute):
         base = _dotted(node.value)
@@ -1021,15 +1129,34 @@ class SecretHandlingDetector(Detector):
             # tokenizerConfig.version) -- check each identifier token
             # against the same word-boundary guard the sibling
             # secret-leak-via-tool-response detector already uses.
-            if any(_name_looks_secret(tok) for tok in _IDENT.findall(code_only)):
-                out.append(Finding(
+            #
+            # 2026-07-29: and check MEMBER CHAINS by their terminal segment
+            # rather than every identifier independently, so
+            # `{ clientId: token.client.id }` is judged on `id` (what is
+            # actually logged) and not on the root object's name.
+            if not any(_chain_is_secret(c) for c in _js_member_chains(code_only)):
+                continue
+            detail = ("A variable whose name suggests a credential is "
+                      "logged/printed; secrets can leak into log files or "
+                      "tool output.")
+            wrapper = _js_redaction_wrapper(code_only)
+            if wrapper:
+                # Target-controlled signal: a hostile repo could name a
+                # passthrough `redactToken`. Per README's one law it may not
+                # silence the finding -- surfaced as context so a triager
+                # checks the helper instead of re-deriving it.
+                detail += (
+                    f" Context: the logged value is wrapped in `{wrapper}(...)`, "
+                    "which may be a redaction helper -- this was NOT verified, "
+                    "and a wrapper name is target-controlled, so the finding is "
+                    "annotated rather than suppressed. Check that helper first."
+                )
+            out.append(Finding(
                     vuln_class="secret-in-log",
                     title="Secret-named value passed to a log call",
                     severity=Severity.P2, confidence=Confidence.LOW,
                     file=f.rel, line=i,
-                    detail="A variable whose name suggests a credential is "
-                           "logged/printed; secrets can leak into log files or "
-                           "tool output.",
+                    detail=detail,
                     remediation="Never log credentials. Redact to a fixed mask "
                                 "or a boolean 'present/absent'.",
                     snippet=f.line_at(i),
@@ -1042,10 +1169,12 @@ class SecretHandlingDetector(Detector):
         # _SECRET_NAME.search -- this call site was the one Python path that
         # still bypassed both guards, and is the exact site the ecosystem
         # scan's `logger.debug(f'Received next_token: ...')` FP came through.
-        for a in list(call.args) + [kw.value for kw in call.keywords]:
-            for sub in ast.walk(a):
-                if isinstance(sub, ast.Name) and _name_looks_secret(sub.id):
-                    return True
-                if isinstance(sub, ast.Attribute) and _name_looks_secret(sub.attr):
-                    return True
-        return False
+        #
+        # 2026-07-29: and judge a member chain by its TERMINAL segment via the
+        # shared `_chain_is_secret`, instead of matching any Name/Attribute
+        # anywhere in the argument. `logger.info(token.client.id)` logs an id,
+        # not a token. Same rule, same helper, as the JS path -- a carve-out
+        # that exists on one surface and not the other is worse than none.
+        return any(_chain_is_secret(segs)
+                   for a in list(call.args) + [kw.value for kw in call.keywords]
+                   for segs in _py_member_chains(a))
