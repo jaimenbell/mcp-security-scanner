@@ -17,6 +17,7 @@ import re
 
 from ..models import Finding, Severity, Confidence
 from .. import js_util
+from ..test_paths import is_test_path
 from .base import Detector, RepoContext, SourceFile
 
 # High-signal secret material patterns (value shapes, not names).
@@ -203,15 +204,16 @@ _EXAMPLE_ENV = re.compile(r"\.env\.(example|sample|template|dist)$")
 # test-fixture path AND a provable self-signed marker; a cert whose issuer
 # != subject, or any cert outside a test-fixture path, is never demoted on
 # "looks like a cert" alone.
-_TEST_PATH_MARKER = re.compile(
-    r"(^|/)(tests?|__tests__|testdata|test-data|testserver|fixtures?|spec|mocks?)(/|$)",
-    re.IGNORECASE,
-)
+#
+# 2026-07-29: the directory-segment regex that used to live here was promoted
+# verbatim into ``mcp_scanner.test_paths`` (which additionally recognises
+# FILENAME markers like ``e2e.test.ts`` -- see that module) so exactly one
+# implementation of "is this a test path?" exists in the scanner. The alias
+# below keeps this module's ~6 internal call sites unchanged; it is the
+# shared function itself, not a wrapper, so the two can never drift.
 _CERT_SUFFIXES = (".pem", ".crt", ".cer")
 
-
-def _is_test_fixture_path(rel: str) -> bool:
-    return bool(_TEST_PATH_MARKER.search(rel))
+_is_test_fixture_path = is_test_path
 
 
 def _try_import_cryptography():
