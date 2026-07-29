@@ -116,6 +116,35 @@ class Taint(str, Enum):
                                # unreachable code, no tools, or non-Python surface
 
 
+class Grade(str, Enum):
+    """Whether ANY precision analysis was established for this finding.
+
+    Added 2026-07-29 after a held-out measurement on five third-party MCP
+    servers returned 0 true positives out of 58 findings. The root cause was
+    not that the detectors were wrong in isolation -- it was that
+    ``reachability.py`` and ``taint.py`` both bail unless the file is
+    ``.py``/``.pyw``, so every JS/TS finding was raw pattern output with no
+    precision layer applied, YET the report rendered it identically to a
+    properly-graded Python finding. Same severity badge, same confidence, no
+    visible difference. MCP servers skew TypeScript (4 of the 5 sampled), so
+    that was the common case, not an edge case.
+
+    The rule is deliberately LANGUAGE-AGNOSTIC -- ``UNGRADED`` means both
+    precision axes came back UNKNOWN, i.e. nothing at all was established
+    beyond the pattern match. That covers every JS/TS/YAML/shell finding, and
+    equally a Python finding in a repo with no discoverable tool
+    registrations. Both really are "we established nothing", and encoding it
+    as an outcome rather than a language check means it cannot drift as new
+    surfaces are added.
+
+    This is a LABEL plus a scoped severity cap (see ``grading.py``). It never
+    drops a finding.
+    """
+
+    GRADED = "graded"      # reachability and/or taint reached a decision
+    UNGRADED = "ungraded"  # both axes UNKNOWN: pattern match and nothing more
+
+
 @dataclass(frozen=True)
 class Finding:
     """A single detected issue at a source location."""
@@ -140,6 +169,15 @@ class Finding:
     # Set by the post-detector taint pass; UNKNOWN until then (and for every
     # non-dataflow-shaped finding), so every existing constructor stays valid.
     taint: Taint = Taint.UNKNOWN
+    # Set by the post-detector grading pass (``grading.py``), which runs last.
+    # Defaults to GRADED so a hand-built Finding (dozens of tests, and
+    # report_generator's JSON round-trip) is never spuriously labelled
+    # ungraded; only the pass itself demotes.
+    grade: Grade = Grade.GRADED
+    # Why this finding could not be graded -- named surface and cause, e.g.
+    # "non-Python surface (.ts): the scanner has no call-graph or dataflow
+    # analysis for this language". Empty for GRADED findings.
+    grade_reason: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -147,6 +185,7 @@ class Finding:
         d["confidence"] = self.confidence.value
         d["reachability"] = self.reachability.value
         d["taint"] = self.taint.value
+        d["grade"] = self.grade.value
         return d
 
 
@@ -160,6 +199,12 @@ class ScanResult:
     errors: list[str] = field(default_factory=list)
     # ISO date the scan ran (set by scan_repo); empty for hand-built results.
     scan_date: str = ""
+    # Per-run grading coverage, set by ``grading.grade_result``: how many
+    # files the precision passes could and could not analyse, why, and how
+    # many findings ended up ungraded. Empty for a hand-built result. This is
+    # what lets a report state its own blind spot instead of presenting a
+    # regex hit and a call-graph-proven finding as the same thing.
+    coverage: dict = field(default_factory=dict)
 
     def add(self, finding: Finding) -> None:
         self.findings.append(finding)
@@ -209,6 +254,7 @@ class ScanResult:
             "clean_bill": self.clean_bill,
             "findings": finding_dicts,
             "errors": self.errors,
+            "coverage": self.coverage,
             # Report-cover provenance (spec 2026-07-23): which scanner
             # version produced this scan, its canonical suite counts, and
             # the scan date -- read by the report generator, never invented

@@ -58,6 +58,7 @@ What the raw number would have misled you about: 3 raw finding(s) reduce to 1 co
 ### `2de1378d5d7a` -- subprocess with shell=True on a tool parameter
 
 - **Severity / confidence:** P0 / high
+- **Grade:** graded
 - **Verdict:** Confirmed (reviewed by Jaimen)
 - **Reviewer note:** Reproduced by hand: the run_command tool's cmd parameter reaches the shell unmodified.
 - **Class:** `param-injection`
@@ -71,6 +72,7 @@ What the raw number would have misled you about: 3 raw finding(s) reduce to 1 co
 ### `ef3a4cf8b6b2` -- mutating tool registered with no visible gate
 
 - **Severity / confidence:** P1 / medium
+- **Grade:** graded
 - **Verdict:** Accepted risk (reviewed by Jaimen)
 - **Reviewer note:** Deliberate admin tool; deployment is tailnet-only. Revisit if exposure changes.
 - **Class:** `tool-scope-creep`
@@ -84,6 +86,7 @@ What the raw number would have misled you about: 3 raw finding(s) reduce to 1 co
 ### `e28dfff3c483` -- hardcoded secret assignment
 
 - **Severity / confidence:** P2 / low
+- **Grade:** graded
 - **Verdict:** False positive (reviewed by Jaimen)
 - **Reviewer note:** Obviously-fake fixture token in the test suite; scanner already demoted it (fake-marker).
 - **Class:** `secret-handling`

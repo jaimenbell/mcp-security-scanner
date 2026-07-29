@@ -60,6 +60,7 @@ What the raw number would have misled you about: 3 raw finding(s) reduce to 1 co
 ### `2de1378d5d7a` -- subprocess with shell=True on a tool parameter
 
 - **Severity / confidence:** P0 / high
+- **Grade:** graded
 - **Verdict:** Confirmed (reviewed by Jaimen)
 - **Reviewer note:** Still present in this scan.
 - **Class:** `param-injection`
@@ -73,6 +74,7 @@ What the raw number would have misled you about: 3 raw finding(s) reduce to 1 co
 ### `ef3a4cf8b6b2` -- mutating tool registered with no visible gate
 
 - **Severity / confidence:** P1 / medium
+- **Grade:** graded
 - **Verdict:** Unreviewed
 - **Class:** `tool-scope-creep`
 - **Location:** `srv/tools.py:88`
@@ -85,6 +87,7 @@ What the raw number would have misled you about: 3 raw finding(s) reduce to 1 co
 ### `e28dfff3c483` -- hardcoded secret assignment
 
 - **Severity / confidence:** P2 / low
+- **Grade:** graded
 - **Verdict:** Unreviewed
 - **Class:** `secret-handling`
 - **Location:** `tests/conftest.py:7`
