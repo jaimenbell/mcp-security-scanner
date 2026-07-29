@@ -9,6 +9,7 @@ from pathlib import Path
 from .detectors import ALL_DETECTORS
 from .detectors.base import Detector, RepoContext, SourceFile
 from .models import ScanResult
+from .grading import grade_result as grade_honesty
 from .reachability import grade_result
 from .taint import grade_result as grade_taint
 
@@ -125,4 +126,13 @@ def scan_repo(target: str, detectors: list[Detector] | None = None) -> ScanResul
         grade_taint(ctx, result)
     except Exception as e:
         result.errors.append(f"taint grading crashed: {e}")
+    # Third and LAST post-detector pass: grading honesty. Reads the two
+    # verdicts above and labels any finding they both left UNKNOWN as
+    # ungraded -- pattern match and nothing more -- with a stated reason, a
+    # scoped severity cap, and per-run coverage. Must run last (it consumes
+    # the other two) and is guarded on the same principle.
+    try:
+        grade_honesty(ctx, result)
+    except Exception as e:
+        result.errors.append(f"grading-honesty pass crashed: {e}")
     return result

@@ -539,9 +539,16 @@ def render_markdown_report(m: dict) -> str:
         add("_No findings in this scan._")
         add("")
     for f in m["findings"]:
-        add(f"### `{f['finding_id']}` -- {_first_sentence(f.get('title', ''))}")
+        # A scan JSON predating the grade axis has no 'grade' key; default to
+        # 'graded' so an older artifact is never retro-labelled ungraded.
+        _ungraded = f.get("grade", "graded") == "ungraded"
+        _badge = "**UNGRADED** " if _ungraded else ""
+        add(f"### `{f['finding_id']}` -- {_badge}{_first_sentence(f.get('title', ''))}")
         add("")
         add(f"- **Severity / confidence:** {f['severity']} / {f.get('confidence', 'unknown')}")
+        add(f"- **Grade:** {f.get('grade', 'graded')}")
+        if f.get("grade_reason"):
+            add(f"- **Not graded because:** {_md_cell(f['grade_reason'])}")
         add(f"- **Verdict:** {VERDICT_LABEL[f['verdict']]}"
             + (f" (reviewed by {f['reviewed_by']})" if f["reviewed_by"] else ""))
         if f["note"]:
@@ -754,12 +761,17 @@ def render_html_report(m: dict) -> str:
     if not m["findings"]:
         add("<p><em>No findings in this scan.</em></p>")
     for f in m["findings"]:
+        # Older scan JSON has no 'grade' key -- default graded, never
+        # retro-label an artifact produced before the axis existed.
+        grade = f.get("grade", "graded")
         add(f"<div class='finding sev-{_e(f['severity'])}'>")
         add(f"<h3><code>{_e(f['finding_id'])}</code> &mdash; "
-            f"{_e(_first_sentence(f.get('title', '')))}</h3>")
+            + ("<strong>UNGRADED</strong> " if grade == "ungraded" else "")
+            + f"{_e(_first_sentence(f.get('title', '')))}</h3>")
         add("<p>"
             f"<span class='badge'>{_e(f['severity'])}</span>"
             f"<span class='badge'>confidence: {_e(f.get('confidence', 'unknown'))}</span>"
+            f"<span class='badge'>grade: {_e(grade)}</span>"
             f"<span class='badge'>verdict: {_e(VERDICT_LABEL[f['verdict']])}</span>"
             f"<span class='badge'>reachability: {_e(f.get('reachability', 'unknown'))}</span>"
             f"<span class='badge'>taint: {_e(f.get('taint', 'unknown'))}</span>"
@@ -768,6 +780,9 @@ def render_html_report(m: dict) -> str:
         add("<table>")
         add(f"<tr><td>Location</td><td><code>{_e(f['file'])}:{_e(f['line'])}"
             "</code></td></tr>")
+        if f.get("grade_reason"):
+            add(f"<tr><td>Not graded because</td><td>{_e(f['grade_reason'])}"
+                "</td></tr>")
         if f["reviewed_by"]:
             add(f"<tr><td>Reviewed by</td><td>{_e(f['reviewed_by'])}</td></tr>")
         if f["note"]:

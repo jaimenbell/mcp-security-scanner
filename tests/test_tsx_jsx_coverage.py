@@ -16,7 +16,7 @@ from mcp_scanner.detectors import (
     ToolScopeCreepDetector,
     SecretLeakResponseDetector,
 )
-from mcp_scanner.models import Severity
+from mcp_scanner.models import Confidence, Grade, Severity
 
 _DETECTORS = [
     ParamInjectionDetector(),
@@ -56,10 +56,14 @@ def test_tsx_file_is_collected(vuln_tsx):
     assert all(f.file.endswith("Dashboard.tsx") for f in vuln_tsx.findings)
 
 
-def test_tsx_eval_flagged(vuln_tsx):
+def test_tsx_eval_flagged_but_ungraded_and_capped(vuln_tsx):
+    """CONTRACT CHANGED 2026-07-29 -- see the long rationale on
+    ``test_param_injection_js.py::test_eval_and_new_function_are_flagged_but_ungraded_and_capped``."""
     ev = [f for f in vuln_tsx.findings if f.vuln_class == "code-eval"]
     assert len(ev) >= 1
-    assert all(f.severity == Severity.P0 for f in ev)
+    assert all(f.grade is Grade.UNGRADED and f.grade_reason for f in ev)
+    assert all(f.severity == Severity.P2 for f in ev)
+    assert all(f.confidence is Confidence.LOW for f in ev)
 
 
 def test_tsx_ungated_mutating_tool_flagged(vuln_tsx):

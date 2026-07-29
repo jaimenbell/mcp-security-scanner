@@ -54,6 +54,7 @@ No triage pass has been applied yet -- the raw count below is NOT a risk count. 
 ### `2de1378d5d7a` -- subprocess with shell=True on a tool parameter
 
 - **Severity / confidence:** P0 / high
+- **Grade:** graded
 - **Verdict:** Unreviewed
 - **Class:** `param-injection`
 - **Location:** `srv/tools.py:42`
@@ -66,6 +67,7 @@ No triage pass has been applied yet -- the raw count below is NOT a risk count. 
 ### `ef3a4cf8b6b2` -- mutating tool registered with no visible gate
 
 - **Severity / confidence:** P1 / medium
+- **Grade:** graded
 - **Verdict:** Unreviewed
 - **Class:** `tool-scope-creep`
 - **Location:** `srv/tools.py:88`
@@ -78,6 +80,7 @@ No triage pass has been applied yet -- the raw count below is NOT a risk count. 
 ### `e28dfff3c483` -- hardcoded secret assignment
 
 - **Severity / confidence:** P2 / low
+- **Grade:** graded
 - **Verdict:** Unreviewed
 - **Class:** `secret-handling`
 - **Location:** `tests/conftest.py:7`

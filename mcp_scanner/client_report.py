@@ -37,7 +37,33 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .models import ScanResult, Finding, Severity, Confidence, Reachability, Taint
+from .models import (ScanResult, Finding, Grade, Severity, Confidence,
+                     Reachability, Taint)
+
+GRADE_LABEL = {
+    Grade.GRADED: "graded",
+    Grade.UNGRADED: "**UNGRADED**",
+}
+
+# Added 2026-07-29. See ``grading.py`` for the measurement that forced this
+# column to exist: without it a regex hit and a call-graph-proven finding
+# render identically, which is what a client actually reads.
+_GRADE_LEGEND = (
+    "whether either precision pass (tool-reachability, tool-parameter "
+    "dataflow) was able to analyse this finding at all. **UNGRADED** means "
+    "neither could -- the finding is a pattern match and nothing more. It has "
+    "NOT been shown reachable from any registered MCP tool, and no check was "
+    "made for a validator or sanitiser sitting next to the flagged line, so a "
+    "guard the maintainer already wrote would not have been seen. The most "
+    "common cause is a non-Python surface: the scanner's call-graph and "
+    "dataflow passes are Python-only, so JS/TS/YAML/shell findings are "
+    "ungraded by construction. Ungraded findings in the dataflow classes "
+    "(shell-injection, code-eval, unsafe-deserialization, ssrf, "
+    "path-traversal) are capped at P2/low, because for those classes the "
+    "severity ladder is itself a dataflow claim. Read the code before acting "
+    "on any ungraded row; nothing here is dropped, but nothing here is proven "
+    "either. Per-run detail is in section 'Grading coverage'."
+)
 
 # Compact, client-readable labels for the reachability grade.
 REACHABILITY_LABEL = {
@@ -262,6 +288,7 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
         "logic, model quality, and infra ops are explicitly out of scope."
     )
     p0s = [f for f in findings if f.severity == Severity.P0]
+    n_ungraded = sum(1 for f in findings if f.grade is Grade.UNGRADED)
 
     L: list[str] = []
 
@@ -276,7 +303,10 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
         "critical includes a reproducible proof you can verify yourself.",
         "",
         f"**Findings: {total} total** -- P0: {counts['P0']}, P1: {counts['P1']}, "
-        f"P2: {counts['P2']}, P3: {counts['P3']}.",
+        f"P2: {counts['P2']}, P3: {counts['P3']}."
+        + (f" **{n_ungraded} of these {total} are UNGRADED** -- see the "
+           "'Graded?' column and section 'Grading coverage'."
+           if n_ungraded else ""),
         "",
         "**Severity legend:** "
         + "; ".join(f"**{s}** = {d}" for s, d in SEVERITY_LEGEND) + ".",
@@ -318,12 +348,13 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
     L += [
         "## 3. Findings by severity",
         "",
-        "| File:Line | Severity | Class | What it is | Remediation | Confidence | Reachable? | Tainted? |",
-        "|---|---|---|---|---|---|---|---|",
+        "| File:Line | Severity | Graded? | Class | What it is | Remediation | Confidence | Reachable? | Tainted? |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for f in findings:
         L.append(
-            f"| `{f.file}:{f.line}` | {f.severity.value} | `{f.vuln_class}` "
+            f"| `{f.file}:{f.line}` | {f.severity.value} "
+            f"| {GRADE_LABEL[f.grade]} | `{f.vuln_class}` "
             f"| {_md_cell(_first_sentence(f.detail))} "
             f"| {_md_cell(f.remediation or '--')} "
             f"| {f.confidence.value} "
@@ -331,8 +362,9 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
             f"| {TAINT_LABEL[f.taint]} |"
         )
     if not findings:
-        L.append("| -- | -- | -- | _no findings_ | -- | -- | -- | -- |")
+        L.append("| -- | -- | -- | -- | _no findings_ | -- | -- | -- | -- |")
     L += [""]
+    L += [f"_Graded?_ = {_GRADE_LEGEND}", ""]
     L += ["_Reachable?_ = whether the flagged code sits inside a registered "
           "MCP tool handler or a function transitively called from one "
           "(same-file call-graph exact, cross-file best-effort). "
@@ -355,6 +387,33 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
           "source) lowers it; **unknown** = non-dataflow class, module-level / "
           "tool-unreachable code, a second import hop, or no discoverable "
           "tools. Also never drops a finding.", ""]
+
+    # 4b. Grading coverage --------------------------------------------------- #
+    # What this scan could and could not analyse, stated per run. A report
+    # that cannot state its own blind spot is what produced 58 undifferentiated
+    # findings on 2026-07-29.
+    cov = result.coverage or {}
+    if cov:
+        L += ["### Grading coverage", ""]
+        L += [
+            f"- Files the precision passes could analyse: "
+            f"**{cov.get('gradable_files', 0)}**",
+            f"- Files they could not: **{cov.get('ungradable_files', 0)}**",
+            f"- Findings graded: **{cov.get('findings_graded', 0)}** | "
+            f"ungraded: **{cov.get('findings_ungraded', 0)}**",
+            "",
+        ]
+        reasons = cov.get("ungradable_files_by_reason") or {}
+        if reasons:
+            L += ["| Files | Reason they could not be graded |", "|---|---|"]
+            for reason, count in reasons.items():
+                L.append(f"| {count} | {_md_cell(reason)} |")
+            L += [""]
+        if not cov.get("tool_registrations_found"):
+            L += ["> No MCP tool registrations were discoverable in this repo, "
+                  "so reachability had no roots to walk and dataflow had no "
+                  "tool parameters to seed. That alone makes every finding "
+                  "ungraded, independent of language.", ""]
 
     # 5. Critical evidence appendix ----------------------------------------- #
     L += ["## 4. Critical evidence appendix", ""]

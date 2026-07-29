@@ -2,7 +2,7 @@ import pytest
 
 from mcp_scanner.scanner import scan_repo
 from mcp_scanner.detectors import ParamInjectionDetector
-from mcp_scanner.models import Severity
+from mcp_scanner.models import Confidence, Grade, Severity
 
 
 @pytest.fixture
@@ -30,10 +30,17 @@ def test_exec_and_shell_spawn_flagged(vuln):
     assert "shell-injection" in _classes(vuln)
 
 
-def test_eval_flagged_as_critical(vuln):
+def test_eval_flagged_but_ungraded_and_capped(vuln):
+    """CONTRACT CHANGED 2026-07-29 -- see the long rationale on
+    ``test_param_injection_js.py::test_eval_and_new_function_are_flagged_but_ungraded_and_capped``.
+    A .cjs file has no AST, so no precision pass can analyse it; for a
+    dataflow class the P0 rung IS the dataflow claim, so a scan reports
+    P2/LOW + UNGRADED rather than an unearned P0."""
     ev = [f for f in vuln.findings if f.vuln_class == "code-eval"]
     assert len(ev) >= 1
-    assert all(f.severity == Severity.P0 for f in ev)
+    assert all(f.grade is Grade.UNGRADED and f.grade_reason for f in ev)
+    assert all(f.severity == Severity.P2 for f in ev)
+    assert all(f.confidence is Confidence.LOW for f in ev)
 
 
 def test_ssrf_and_traversal_flagged(vuln):

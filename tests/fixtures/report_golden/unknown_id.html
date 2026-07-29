@@ -85,7 +85,7 @@ footer { margin-top: 2.5rem; font-size: .8rem; color: #555;
 <h2>4. Findings detail</h2>
 <div class='finding sev-P0'>
 <h3><code>2de1378d5d7a</code> &mdash; subprocess with shell=True on a tool parameter</h3>
-<p><span class='badge'>P0</span><span class='badge'>confidence: high</span><span class='badge'>verdict: Confirmed</span><span class='badge'>reachability: reachable</span><span class='badge'>taint: tainted</span><span class='badge'>class: param-injection</span></p>
+<p><span class='badge'>P0</span><span class='badge'>confidence: high</span><span class='badge'>grade: graded</span><span class='badge'>verdict: Confirmed</span><span class='badge'>reachability: reachable</span><span class='badge'>taint: tainted</span><span class='badge'>class: param-injection</span></p>
 <table>
 <tr><td>Location</td><td><code>srv/tools.py:42</code></td></tr>
 <tr><td>Reviewed by</td><td>Jaimen</td></tr>
@@ -97,7 +97,7 @@ footer { margin-top: 2.5rem; font-size: .8rem; color: #555;
 </table></div>
 <div class='finding sev-P1'>
 <h3><code>ef3a4cf8b6b2</code> &mdash; mutating tool registered with no visible gate</h3>
-<p><span class='badge'>P1</span><span class='badge'>confidence: medium</span><span class='badge'>verdict: Unreviewed</span><span class='badge'>reachability: reachable</span><span class='badge'>taint: unknown</span><span class='badge'>class: tool-scope-creep</span></p>
+<p><span class='badge'>P1</span><span class='badge'>confidence: medium</span><span class='badge'>grade: graded</span><span class='badge'>verdict: Unreviewed</span><span class='badge'>reachability: reachable</span><span class='badge'>taint: unknown</span><span class='badge'>class: tool-scope-creep</span></p>
 <table>
 <tr><td>Location</td><td><code>srv/tools.py:88</code></td></tr>
 <tr><td>What was found</td><td>delete_records is a mutating @mcp.tool() with no permission-group gate or env-flag opt-in in its file</td></tr>
@@ -107,7 +107,7 @@ footer { margin-top: 2.5rem; font-size: .8rem; color: #555;
 </table></div>
 <div class='finding sev-P2'>
 <h3><code>e28dfff3c483</code> &mdash; hardcoded secret assignment</h3>
-<p><span class='badge'>P2</span><span class='badge'>confidence: low</span><span class='badge'>verdict: Unreviewed</span><span class='badge'>reachability: unknown</span><span class='badge'>taint: unknown</span><span class='badge'>class: secret-handling</span></p>
+<p><span class='badge'>P2</span><span class='badge'>confidence: low</span><span class='badge'>grade: graded</span><span class='badge'>verdict: Unreviewed</span><span class='badge'>reachability: unknown</span><span class='badge'>taint: unknown</span><span class='badge'>class: secret-handling</span></p>
 <table>
 <tr><td>Location</td><td><code>tests/conftest.py:7</code></td></tr>
 <tr><td>What was found</td><td>TEST_TOKEN assigned a secret-shaped literal (fake-marker)</td></tr>
