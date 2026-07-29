@@ -319,12 +319,26 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
         top = findings[0]
         incident = VULN_CLASS_INCIDENT_LANG.get(
             top.vuln_class, "a flagged risky pattern")
+        # The "each critical includes a proof" claim is only made when there
+        # ARE criticals, and the ungraded share is stated up front rather than
+        # left to the findings table -- an executive summary that reads the
+        # same whether or not the scanner could analyse the code is the
+        # reporting half of the 2026-07-29 measurement failure.
+        proof_claim = (" Each critical below includes a reproducible proof you "
+                       "can check yourself." if p0s else "")
+        ungraded_claim = (
+            f" **{n_ungraded} of the {total} are UNGRADED** -- neither the "
+            "reachability nor the dataflow pass could analyse them, so they "
+            "are pattern matches with nothing behind them yet; read those "
+            "before acting."
+            if n_ungraded else
+            " Every finding was graded for tool-reachability."
+        )
         L += [
             f"We scanned `{_short(result.target)}` ({result.files_scanned} source "
             f"files) and found **{total} finding{'s' if total != 1 else ''}** "
             f"({counts['P0']} critical, {counts['P1']} high). The most serious "
-            f"class is **{incident}**. Each critical below includes a "
-            "reproducible proof you can check yourself, and the closing "
+            f"class is **{incident}**.{ungraded_claim}{proof_claim} The closing "
             "fix-lane plan sequences the remediation work.",
         ]
     else:
@@ -334,9 +348,16 @@ def render_client_report(result: ScanResult, client_name: str = "the client",
     L += [""]
 
     # 3. Top 3 to fix ------------------------------------------------------ #
+    # Graded findings lead WITHIN a severity tier (2026-07-29). Severity still
+    # dominates -- an ungraded P0 still outranks a graded P2 -- but a client's
+    # attention goes to this list first, and an ungraded finding is a pattern
+    # match with no reachability or dataflow behind it. Leading with one is the
+    # exact failure the grading pass exists to prevent.
+    top3 = sorted(findings, key=lambda f: (f.severity.rank,
+                                            0 if f.grade is Grade.GRADED else 1))
     L += ["## 2. Top 3 to fix", ""]
     if findings:
-        for n, f in enumerate(findings[:3], start=1):
+        for n, f in enumerate(top3[:3], start=1):
             L.append(f"{n}. **[{f.severity.value}] `{f.file}:{f.line}`** -- "
                      f"{_first_sentence(f.detail)}. "
                      f"_Fix:_ {f.remediation or 'see finding.'}")
