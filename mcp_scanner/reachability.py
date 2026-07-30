@@ -43,7 +43,8 @@ from dataclasses import replace
 from .detectors.base import RepoContext, SourceFile
 from .models import Confidence, Finding, Reachability, ScanResult
 from .test_paths import is_test_path
-from .tool_registry import _dotted, extract_tool_registry
+from .tool_registry import (UNROOTED_PY_SOURCES, _dotted,
+                            extract_tool_registry)
 
 
 # Evidence attached to the path-shape CLI_ONLY fallback (see ``_grade_one``).
@@ -248,8 +249,15 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
     # finding that is, in truth, reachable only through the un-rooted
     # dispatcher this pass never walked. Same treatment as
     # ``dynamic_dispatch_present``: soundness over decidability.
-    unrooted_lowlevel = any(
-        r.node is None and r.source == "py-lowlevel-sdk" for r in registry
+    #
+    # 2026-07-30 (recall slice 1): broadened from the single "py-lowlevel-sdk"
+    # source to ``UNROOTED_PY_SOURCES``, imported from ``tool_registry`` rather
+    # than re-listed here so the set and its justification cannot drift. The
+    # new ``py-call`` source (``self.tool(handler, name=...)``, mcp-server-
+    # qdrant's shape) has exactly the same property: it proves a real Python
+    # tool exists whose root could not be attributed without guessing.
+    unrooted_py_root = any(
+        r.node is None and r.source in UNROOTED_PY_SOURCES for r in registry
     )
 
     cg = CallGraph(ctx)
@@ -258,7 +266,7 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
     graded: list[Finding] = []
     for f in result.findings:
         label, evidence = _grade_one(f, ctx, cg, reachable_ids, has_tools,
-                                      bool(tool_nodes), unrooted_lowlevel)
+                                      bool(tool_nodes), unrooted_py_root)
         conf = f.confidence
         if label is Reachability.REACHABLE:
             conf = _RAISE[f.confidence]
@@ -271,7 +279,7 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
 
 def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
                reachable_ids: set[int], has_tools: bool,
-               have_py_handlers: bool, unrooted_lowlevel: bool = False) -> tuple[Reachability, str]:
+               have_py_handlers: bool, unrooted_py_root: bool = False) -> tuple[Reachability, str]:
     """Call-graph grade first; path-shape fallback only where it said UNKNOWN.
 
     STRICT ORDERING (2026-07-29, and the point of the split): ``_grade_ast``
@@ -282,7 +290,7 @@ def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
     ``*.test.py``.
     """
     label, evidence = _grade_ast(f, ctx, cg, reachable_ids, has_tools,
-                                 have_py_handlers, unrooted_lowlevel)
+                                 have_py_handlers, unrooted_py_root)
     if label is not Reachability.UNKNOWN:
         return label, evidence
     # Nothing decidable from the call-graph -- for a non-Python surface that
@@ -299,7 +307,7 @@ def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
 
 def _grade_ast(f: Finding, ctx: RepoContext, cg: CallGraph,
                reachable_ids: set[int], has_tools: bool,
-               have_py_handlers: bool, unrooted_lowlevel: bool = False) -> tuple[Reachability, str]:
+               have_py_handlers: bool, unrooted_py_root: bool = False) -> tuple[Reachability, str]:
     if not has_tools:
         return Reachability.UNKNOWN, ""
     src = None
@@ -330,8 +338,8 @@ def _grade_ast(f: Finding, ctx: RepoContext, cg: CallGraph,
     # (soundness over decidability: 2026-07-22, see Reachability docstring),
     # or an un-rooted low-level-SDK dispatcher exists in this same repo that
     # this pass never walked (soundness over decidability: 2026-07-23 round-3
-    # N-vote fix -- see the ``unrooted_lowlevel`` comment in grade_result).
-    if cg.dynamic_dispatch_present or unrooted_lowlevel:
+    # N-vote fix -- see the ``unrooted_py_root`` comment in grade_result).
+    if cg.dynamic_dispatch_present or unrooted_py_root:
         return Reachability.UNKNOWN, ""
     callers = cg.callers_outside(enclosing)
     if callers:

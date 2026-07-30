@@ -9,13 +9,21 @@ MCP tools", used by two consumers:
   * ``reachability.py`` — needs the registered tool handlers as the roots of
     its call-graph reachability grading.
 
-Discovery covers the three dominant real-world shapes in this fleet:
+Discovery covers these real-world shapes:
 
   1. **Python FastMCP decorators** — ``@mcp.tool()`` / ``@server.tool()`` (and
      any ``<x>.tool`` attribute call/name), parsed from the AST.
-  2. **JS/TS registrations** — ``server.tool("name", ...)`` /
-     ``<x>.tool(...)`` calls, matched at regex level (the JS surface has no AST
-     path in this scanner, stated honestly on every report).
+  2. **JS/TS registrations** — four idioms, matched at regex level (the JS
+     surface has no AST path in this scanner, stated honestly on every
+     report): the deprecated ``server.tool("name", ...)``, the current SDK's
+     ``server.registerTool(name, config, handler)``, fastmcp's
+     ``server.addTool({ name, ... })``, and the low-level TS SDK's
+     ``setRequestHandler(CallToolRequestSchema, ...)`` dispatcher. See
+     ``_extract_js``; ``node`` is ``None`` on every one of them, without
+     exception.
+  2b. **Python FastMCP by CALL** (2026-07-30) — ``self.tool(handler,
+     name=...)``, how a ``FastMCP`` subclass that builds handlers
+     programmatically registers them. See ``_extract_python_calls``.
   3. **Python low-level MCP SDK** (2026-07-23) — ``Server()`` + a
      ``@server.list_tools()`` handler returning ``types.Tool(...)`` / bare
      ``Tool(...)`` objects, dispatched via a single ``@server.call_tool()``
@@ -125,13 +133,75 @@ class ToolRegistration:
     node: object | None = None  # the ast.FunctionDef for py-decorator, else None
 
 
-# JS/TS: `server.tool("name", ...)`  /  `foo.tool('name', ...)` / `.tool(` bare
+# --------------------------------------------------------------------- #
+# JS/TS registration idioms (2026-07-30 recall slice 1)
+#
+# The five-target hand audit pinned in ``ecoscan-targets.lock.json`` found the
+# original single pattern below -- ``<x>.tool(`` -- matched the DEPRECATED
+# ``server.tool()`` API and nothing else, so four of five real MCP servers
+# registered zero tools and the fifth registered one unnamed placeholder.
+# ``has_tools`` was False, which cascades: ``grading._reason_for`` reports "no
+# MCP tool registrations were found", and ``tool_scope_creep._scan_js`` /
+# ``secret_leak_response._scan_js`` -- both keyed on ``source == "js-regex"``
+# -- never inspected a single handler window.
+#
+# Every pattern here stays ``source="js-regex"`` (so both JS window detectors
+# pick it up with no change) and ``node=None`` (see ``_extract_js``).
+# --------------------------------------------------------------------- #
+
+# Deprecated MCP TS SDK: `server.tool("name", ...)` / `foo.tool('name', ...)`
 _JS_TOOL_RE = re.compile(
     r"\b[\w$]+\.tool\s*\(\s*(?:[\"'`]([^\"'`]+)[\"'`])?",
 )
+# Current MCP TS SDK: `server.registerTool(name, config, handler)`
+# (airtable-mcp-server -- 16 call sites, name usually on the NEXT line).
+_JS_REGISTER_TOOL_RE = re.compile(
+    r"\b[\w$]+\.registerTool\s*\(\s*(?:[\"'`]([^\"'`]+)[\"'`])?",
+)
+# fastmcp TS SDK: `server.addTool({ name: '...', ... })` (firecrawl-mcp-server).
+# The `{` is required so the four non-registration shapes firecrawl's own
+# source carries -- `Pick<FastMCP<S>, 'addTool'>`, `Parameters<typeof
+# server.addTool>`, `server.addTool.bind(server)`, and `addTool: (...)` as an
+# object property -- cannot match.
+_JS_ADD_TOOL_RE = re.compile(r"\b[\w$]+\.addTool\s*\(\s*\{")
+# Low-level TS SDK: `setRequestHandler(CallToolRequestSchema, handler)`
+# (notion-mcp-server).  ``ListToolsRequestSchema`` is deliberately NOT matched:
+# it returns tool METADATA and never executes tool logic, the same distinction
+# ``_extract_low_level_sdk`` enforces on the Python side (2026-07-23 round-3
+# N-vote fix).  Anchoring a detector window on the tool-listing code would scan
+# it as though it were a handler body.
+_JS_CALLTOOL_DISPATCH_RE = re.compile(
+    r"\.setRequestHandler\s*\(\s*CallToolRequestSchema\b",
+)
+
+# Name recovery for the two multi-line shapes above.
+# `registerTool(` + a following line that is JUST a string literal + comma.
+_JS_LEADING_STRING_RE = re.compile(r"^\s*[\"'`]([^\"'`]+)[\"'`]\s*(?:,|$)")
+# `addTool({` + a `name: '...'` property within a short window.
+_JS_NAME_PROP_RE = re.compile(r"(?:^|[{,\s])name\s*:\s*[\"'`]([^\"'`]+)[\"'`]")
+# Lines of look-ahead allowed when recovering a name.  Deliberately small: a
+# wide window would start capturing an unrelated nested `name:` and label a
+# tool with something that is not its name.
+_JS_NAME_LOOKAHEAD = 4
+
 # Shared with js_util.JS_SUFFIXES (same set) rather than a private duplicate
 # that could silently drift from it.
 _JS_SUFFIXES = js_util.JS_SUFFIXES
+
+# Python registration sources whose ``node`` may legitimately be ``None``
+# (a real tool exists, but no unambiguous call-graph root could be attributed
+# to it without guessing).  ``reachability.grade_result`` must withhold its
+# CLI_ONLY/UNCALLED downgrade repo-wide when any of these is present --
+# soundness over decidability.  Imported by ``reachability`` rather than
+# copied, so the two cannot drift.
+UNROOTED_PY_SOURCES = ("py-lowlevel-sdk", "py-call")
+
+# Top-level packages whose import counts as MCP provenance for the FastMCP
+# CALL-registration shape (``self.tool(handler, name=...)``).  Two distinct
+# distributions expose ``FastMCP``: ``mcp.server.fastmcp`` (bundled with the
+# official SDK) and the standalone ``fastmcp`` package -- mcp-server-qdrant
+# imports the latter, so an ``mcp``-only gate found zero of its 2 tools.
+_FASTMCP_IMPORT_ROOTS = ("mcp", "fastmcp")
 
 
 def _extract_python(f: SourceFile) -> list[ToolRegistration]:
@@ -155,21 +225,181 @@ def _extract_python(f: SourceFile) -> list[ToolRegistration]:
     return out
 
 
+def _js_next_code_line(lines: list[str], idx: int) -> str | None:
+    """The next non-blank, non-comment line after 0-based ``idx``, or None."""
+    for j in range(idx + 1, min(idx + 1 + _JS_NAME_LOOKAHEAD, len(lines))):
+        raw = lines[j]
+        if not raw.strip() or js_util.is_comment_line(raw):
+            continue
+        return js_util.code_part(raw)
+    return None
+
+
+def _js_name_in_window(lines: list[str], idx: int, tail: str) -> str | None:
+    """First ``name: "..."`` property in ``tail`` (rest of the matched line)
+    or the next few code lines -- the fastmcp ``addTool({ name: ... })``
+    shape.  Window-limited on purpose: see ``_JS_NAME_LOOKAHEAD``."""
+    m = _JS_NAME_PROP_RE.search(tail)
+    if m:
+        return m.group(1)
+    for j in range(idx + 1, min(idx + 1 + _JS_NAME_LOOKAHEAD, len(lines))):
+        raw = lines[j]
+        if not raw.strip() or js_util.is_comment_line(raw):
+            continue
+        m = _JS_NAME_PROP_RE.search(js_util.code_part(raw))
+        if m:
+            return m.group(1)
+    return None
+
+
 def _extract_js(f: SourceFile) -> list[ToolRegistration]:
+    """Regex-level JS/TS tool discovery -- four registration idioms.
+
+    ``node`` is ``None`` on every record this function produces, without
+    exception.  ``ToolRegistration.node`` is consumed as an ``ast.AST`` by
+    ``reachability.reachable_from`` and ``taint.propagate``; a regex match has
+    no AST node, and inventing one would feed a non-AST object into the Python
+    call-graph.  This function buys ``has_tools`` and the JS window detectors'
+    inspection windows.  It does NOT give JS/TS a call graph.
+    """
     out: list[ToolRegistration] = []
     if f.suffix not in _JS_SUFFIXES:
         return out
-    for i, line in enumerate(f.lines, start=1):
+    lines = f.lines
+    for idx, raw in enumerate(lines):
+        if js_util.is_comment_line(raw):
+            continue
+        line = js_util.code_part(raw)
+        lineno = idx + 1
+
+        # Deprecated `.tool("name", ...)` -- unchanged behaviour.
         m = _JS_TOOL_RE.search(line)
         if m:
             out.append(ToolRegistration(
-                name=m.group(1) or "(inline)",
-                handler="",
-                file=f.rel,
-                line=i,
-                source="js-regex",
-                node=None,
+                name=m.group(1) or "(inline)", handler="", file=f.rel,
+                line=lineno, source="js-regex", node=None,
             ))
+            continue
+
+        # Current SDK `.registerTool(name, config, handler)`.  When the name
+        # is not on the call line it is the very NEXT code line and nothing
+        # else -- only that one line is inspected, so a variable first
+        # argument (`registerTool(toolName, ...)`) yields "(inline)" rather
+        # than a string lifted out of the config object.
+        m = _JS_REGISTER_TOOL_RE.search(line)
+        if m:
+            name = m.group(1)
+            if not name:
+                nxt = _js_next_code_line(lines, idx)
+                if nxt is not None:
+                    lead = _JS_LEADING_STRING_RE.match(nxt)
+                    if lead:
+                        name = lead.group(1)
+            out.append(ToolRegistration(
+                name=name or "(inline)", handler="", file=f.rel,
+                line=lineno, source="js-regex", node=None,
+            ))
+            continue
+
+        # fastmcp `.addTool({ name: "...", ... })`.
+        m = _JS_ADD_TOOL_RE.search(line)
+        if m:
+            name = _js_name_in_window(lines, idx, line[m.end():])
+            out.append(ToolRegistration(
+                name=name or "(inline)", handler="", file=f.rel,
+                line=lineno, source="js-regex", node=None,
+            ))
+            continue
+
+        # Low-level SDK `setRequestHandler(CallToolRequestSchema, ...)`.  One
+        # dispatcher serves every tool and the names are resolved at runtime
+        # (notion generates them from an OpenAPI spec), so there is no static
+        # name to recover -- "(inline)" is the honest label, and the detector
+        # windows anchor on the dispatcher body, which is what executes.
+        if _JS_CALLTOOL_DISPATCH_RE.search(line):
+            out.append(ToolRegistration(
+                name="(inline)", handler="", file=f.rel,
+                line=lineno, source="js-regex", node=None,
+            ))
+    return out
+
+
+def _extract_python_calls(f: SourceFile) -> list[ToolRegistration]:
+    """Python FastMCP registration by CALL rather than decorator:
+    ``self.tool(handler, name="...")`` (2026-07-30 recall slice 1).
+
+    ``FastMCP.tool`` is a normal method, and a subclass that builds its
+    handlers programmatically calls it directly instead of decorating.
+    mcp-server-qdrant does exactly this (``mcp_server.py:187,195``) and
+    registered 0 of its 2 tools before this path existed -- the only Python
+    target in the pinned set, and it was reporting ``has_tools=False``.
+
+    Two guards, both deliberate:
+
+    * **Provenance.** Gated on an import from ``mcp`` OR ``fastmcp``,
+      mirroring ``_extract_low_level_sdk``'s ``_file_imports_mcp``.  Plenty of
+      non-MCP libraries have a ``.tool(...)`` method, and a bogus registration
+      flips ``has_tools`` for a repo that exposes no MCP tools at all.
+      ``fastmcp`` is in the allowed set because the standalone package is a
+      distinct distribution from ``mcp.server.fastmcp`` and qdrant imports the
+      standalone one (``from fastmcp import Context, FastMCP``) -- gating on
+      ``mcp`` alone found zero tools in the one Python target in the pinned
+      set.  ``_extract_low_level_sdk`` keeps the narrower ``mcp``-only gate:
+      ``Server``/``call_tool``/``types.Tool`` are low-level ``mcp`` SDK
+      symbols and ``fastmcp`` provenance would not justify trusting them.
+    * **Never guess a root.** ``node`` is set only when the first positional
+      argument is the name of a function defined exactly once in this same
+      file -- an unambiguous, genuine ``FunctionDef``.  qdrant's real argument
+      is a local alias (``find_foo = find``) that is conditionally REASSIGNED
+      to a wrapper, so resolving it would be a guess; a wrong root is a
+      confident mis-grade, the failure ``_extract_low_level_sdk`` was
+      corrected for twice.  Unrooted records are declared via
+      ``UNROOTED_PY_SOURCES`` so ``reachability`` withholds its downgrade
+      repo-wide.
+    """
+    out: list[ToolRegistration] = []
+    if f.tree is None or not _file_imports_mcp(f, roots=_FASTMCP_IMPORT_ROOTS):
+        return out
+
+    decorator_call_ids: set[int] = set()
+    func_name_counts: dict[str, int] = {}
+    funcdefs: dict[str, ast.AST] = {}
+    for node in ast.walk(f.tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func_name_counts[node.name] = func_name_counts.get(node.name, 0) + 1
+            funcdefs.setdefault(node.name, node)
+            for deco in node.decorator_list:
+                if isinstance(deco, ast.Call):
+                    decorator_call_ids.add(id(deco))
+
+    for node in ast.walk(f.tree):
+        if not isinstance(node, ast.Call) or id(node) in decorator_call_ids:
+            continue
+        dotted = _dotted(node.func)
+        if not dotted or dotted.split(".")[-1] != "tool":
+            continue
+        if not node.args:
+            # `mcp.tool()` with no positional argument is the decorator
+            # FACTORY form; the decorator path above already owns it.
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant):
+            # `mcp.tool("name")` registers no handler here -- it is the
+            # decorator factory again, or something else entirely.
+            continue
+        handler_name = first.id if isinstance(first, ast.Name) else ""
+        handler_node: ast.AST | None = None
+        if handler_name and func_name_counts.get(handler_name) == 1:
+            handler_node = funcdefs.get(handler_name)
+        fallback = handler_name or f"(unnamed-tool@{f.rel}:{node.lineno})"
+        out.append(ToolRegistration(
+            name=_declared_tool_name(node, fallback),
+            handler=handler_name,
+            file=f.rel,
+            line=node.lineno,
+            source="py-call",
+            node=handler_node,
+        ))
     return out
 
 
@@ -218,11 +448,14 @@ def _tool_ctor_name(call: ast.Call) -> str | None:
     return None
 
 
-def _file_imports_mcp(f: SourceFile) -> bool:
+def _file_imports_mcp(f: SourceFile, roots: tuple[str, ...] = ("mcp",)) -> bool:
     """Import-provenance gate (2026-07-23 N-vote fix, P1): True only if this
-    file actually imports something from the ``mcp`` package (``import mcp``
+    file actually imports something from one of ``roots`` (``import mcp``
     / ``import mcp.xxx`` / ``from mcp import ...`` / ``from mcp.xxx import
-    ...``). Required before a file's ``Server()``/``call_tool()``/
+    ...``). ``roots`` defaults to the low-level SDK's ``mcp`` package only;
+    ``_extract_python_calls`` widens it to ``_FASTMCP_IMPORT_ROOTS`` because
+    the standalone ``fastmcp`` distribution is a separate top-level package.
+    Required before a file's ``Server()``/``call_tool()``/
     ``list_tools()``/``Tool()`` name-shapes are trusted as the real MCP
     low-level SDK -- otherwise a same-named non-MCP class (a LangChain
     ``class Tool``, an unrelated ``.call_tool()``-named method on some other
@@ -231,12 +464,16 @@ def _file_imports_mcp(f: SourceFile) -> bool:
     by the N-vote refuters)."""
     if f.tree is None:
         return False
+
+    def _is_root(mod: str) -> bool:
+        return any(mod == r or mod.startswith(r + ".") for r in roots)
+
     for node in ast.walk(f.tree):
         if isinstance(node, ast.Import):
-            if any(alias.name == "mcp" or alias.name.startswith("mcp.") for alias in node.names):
+            if any(_is_root(alias.name) for alias in node.names):
                 return True
         elif isinstance(node, ast.ImportFrom):
-            if node.module and (node.module == "mcp" or node.module.startswith("mcp.")):
+            if node.module and _is_root(node.module):
                 return True
     return False
 
@@ -530,6 +767,7 @@ def extract_tool_registry(ctx: RepoContext) -> list[ToolRegistration]:
     regs: list[ToolRegistration] = []
     for f in ctx.files:
         regs.extend(_extract_python(f))
+        regs.extend(_extract_python_calls(f))
         regs.extend(_extract_js(f))
     regs.extend(_extract_low_level_sdk(ctx))
     regs.extend(_extract_manifest(ctx))
