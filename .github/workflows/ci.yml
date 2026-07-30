@@ -36,6 +36,11 @@ jobs:
       #
       # To gate later: drop continue-on-error, set exit-code to "1", and add
       # a .trivyignore entry for any accepted-risk CVE with a dated rationale.
+      # .trivyignore.yaml suppresses 3 known/intentional secret-scanner
+      # test fixtures by exact (rule id, path) pair -- see the scope
+      # contract at the top of that file before touching it. trivy does
+      # NOT auto-load a *.yaml-named ignorefile, so it must be passed
+      # explicitly via trivyignores below or this has no effect.
       - name: Dependency vulnerability scan (warn-only)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         continue-on-error: true
@@ -45,3 +50,4 @@ jobs:
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           exit-code: "0"
+          trivyignores: .trivyignore.yaml
