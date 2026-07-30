@@ -1,9 +1,3 @@
----
-title: MCP Server Security Scanner
-type: product-readme
-status: prototype
----
-
 # mcp-security-scanner
 
 [![CI](https://github.com/jaimenbell/mcp-security-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/jaimenbell/mcp-security-scanner/actions/workflows/ci.yml)
