@@ -7,6 +7,9 @@ A static security scanner for [Model Context Protocol](https://modelcontextproto
 > [!info] What this is, plainly
 > This is **static analysis**, not a prover. It reads code; it does not run your server, and it does not prove any finding is remotely exploitable. It produces a prioritized review queue, not a verdict. A "clean bill" means *these detectors found no critical/high patterns* — not a security guarantee. That boundary is printed on every report on purpose.
 
+> [!warning] Not to be confused with the other PyPI package named `mcp-security-scanner`
+> There is an unrelated project on PyPI under the plain name `mcp-security-scanner` (a runtime pentester that connects to a *live* MCP server over HTTP/SSE). This repo is a different tool: it performs **static analysis of server source code**, offline, with no network connection to the target. Because the plain name was already taken, this project's PyPI distribution is published as `jaimenbell-mcp-security-scanner`; the console command (`mcp-scan`) and the import package (`mcp_scanner`) are unaffected.
+
 ## What it scans
 
 Seven detector families. The first six are grounded in a real finding from a fleet-wide audit of production MCP servers; the seventh (added 2026-07-21) covers scheduled jobs, wrappers, and IaC/CI files — cron, systemd, GitHub Actions, PowerShell/bash/batch deploy scripts:
