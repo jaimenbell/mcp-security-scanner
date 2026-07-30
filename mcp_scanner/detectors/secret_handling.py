@@ -226,8 +226,20 @@ _SECRET_NAME = re.compile(
 # placeholder word (``"testing_a_real_leaked_credential"``) is no longer
 # wrongly treated as a placeholder -- only a value that IS (in full) one
 # of these placeholder shapes is excluded.
+#
+# 2026-07-30 (recall slice 3): the redaction-marker shapes were added after
+# un-gating the name branch onto JS/TS surfaced mcp-server-neon
+# ``mcp/tools/handlers/neon-auth-settings-snapshot.ts:19`` --
+# ``export const REDACTED_SECRET = '***redacted***'``, the sentinel that means
+# "upstream redacted this in transit". A value that IS, in full, the word
+# `redacted`/`masked`/`sanitized` (optionally wrapped in masking asterisks)
+# cannot simultaneously be a working credential, which is the same
+# self-limiting bar every other entry in this curated list meets. Curated-list
+# membership is OUR OWN judgment, not a target-controlled signal, so it may
+# fully suppress -- see the module note.
 _PLACEHOLDER = re.compile(
     r"(x+|your[_-]?\w*|<.*>|\.\.\.+|changeme|placeholder|example|dummy|test|none|null|"
+    r"\*{2,}[\w -]*\*{2,}|[*]*(?:redacted|masked|sanitized)[*]*|"
     r"\$\{.*\}|env\[.*\]|os\.environ.*|getenv\(.*\))",
     re.IGNORECASE,
 )
@@ -508,6 +520,21 @@ def _sibling_self_signed_cert(rel: str, root) -> bool:
 # Python path's AST check (Name/Attribute *identifiers* only -- log MESSAGE
 # prose that happens to mention "token" must never trigger this, only an
 # actual secret-named variable/property passed as an argument).
+# JS/TS assignment of a string literal to a (possibly dotted) name --
+# the language's half of the name-based secret branch (2026-07-30 recall
+# slice 3). Anchored so `===`/`!==`/`+=`/`<=` cannot be read as assignment,
+# and so an object-literal `name: value` property is NOT matched (see
+# ``SecretHandlingDetector._scan_js_name_assignments`` for why that scope
+# mirrors the Python branch rather than exceeding it). An optional TypeScript
+# type annotation between the name and the `=` is tolerated.
+_JS_SECRET_ASSIGN = re.compile(
+    r"(?:\b(?:const|let|var)\s+)?"
+    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
+    r"\s*(?::\s*[A-Za-z0-9_$<>\[\]|.\s]+?)?"
+    r"\s*(?<![=!<>+\-*/&|^%])=(?!=)\s*"
+    r"(?P<q>['\"`])(?P<value>(?:\\.|(?!(?P=q)).)*)(?P=q)"
+)
+
 _JS_LOG_CALL = re.compile(
     r"\b(?:console\.(?:log|error|warn|info|debug)|"
     r"logger\.(?:log|info|debug|warn|error)|"
@@ -965,13 +992,25 @@ class SecretHandlingDetector(Detector):
                         # are surfaced; the value itself still never is.
                         snippet=f"<redacted secret line{tag_suffix}>",
                     ))
-        # AST: NAME = "literal" where NAME looks secret and value looks
-        # real. Round-2 N-vote P2-6 fix: this branch was DEAD CODE (see
+        # NAME = "literal" where NAME looks secret and the value looks real.
+        # Round-2 N-vote P2-6 fix: this branch was DEAD CODE (see
         # _PLACEHOLDER's docstring above) -- now live, it gets the SAME
         # guards _scan_literals already applies: the curated placeholder
         # list may fully suppress (our own judgment); a pragma
         # suppress-comment and a fake-value-marker may only demote
         # confidence and tag the finding (round-3: NEVER continue/drop).
+        #
+        # 2026-07-30 (recall slice 3): the branch used to run under
+        # `if f.tree is not None` alone, i.e. Python only. The 2026-07-30
+        # five-target hand audit found a live-format Airtable PAT committed at
+        # airtable-mcp-server src/e2e.test.ts:23 -- and
+        # _name_looks_secret('AIRTABLE_API_KEY') returns True, so this branch
+        # would have caught it had the language gate not stopped it. The value
+        # branch above never had a chance: no pattern in
+        # _SECRET_VALUE_PATTERNS covers the `pat...` shape. A JS/TS path is
+        # now taken in the else, sharing ONE finding constructor with the
+        # Python path so the two cannot drift.
+        name_assignments: list[tuple[str, str, int]] = []
         if f.tree is not None:
             for node in ast.walk(f.tree):
                 if isinstance(node, ast.Assign):
@@ -984,97 +1023,218 @@ class SecretHandlingDetector(Detector):
                     if _PLACEHOLDER.fullmatch(value) or len(value) < 8:
                         continue
                     for tgt in node.targets:
-                        nm = _dotted(tgt)
-                        # Round-3 N-vote P1 (B2) fix: this used to call
-                        # raw _SECRET_NAME.search(nm), bypassing the
-                        # shared _name_looks_secret helper's word-boundary
-                        # guard AND its pagination-cursor-name exclusion
-                        # (OUR OWN curated name-shape judgment, same
-                        # "may fully exclude" category as the placeholder
-                        # list -- not a target-controlled signal). 14 of
-                        # awslabs/mcp's 209 revived-branch findings were
-                        # pagination-named assignments
-                        # (`expected_response.next_token = '...'`) that
-                        # should never have reached this branch at all.
-                        if not (nm and _name_looks_secret(nm)):
-                            continue
-                        has_suppress_comment = bool(_SUPPRESS_COMMENT.search(f.line_at(node.lineno)))
-                        # AST-name branch (base MEDIUM, weaker than the
-                        # value-shape branch). Here test-path may pair with a
-                        # mock/fake-shaped assignment NAME -- TWO independent
-                        # signals -- to demote the wave-4 noise class
-                        # (`mock_credentials.token = "..."`). This is SAFE for
-                        # a real secret: if the assigned VALUE were value-shaped
-                        # (AKIA/ghp_/...), the value-shape branch above already
-                        # emitted a HIGH finding that a mock name cannot pull
-                        # down; this branch only demotes the weaker name-based
-                        # duplicate whose value is an arbitrary string. A mock
-                        # name alone (no test path) does NOT demote.
-                        name_mock = _name_has_mock_marker(nm)
-                        confidence, tag_suffix = _compose_demotion(
-                            [
-                                (has_suppress_comment, "author-suppressed"),
-                                (_has_fake_marker(value), "fake-marker"),
-                            ],
-                            is_test_path=is_test_path,
-                            path_cosignals=[(name_mock, "mock-name")],
-                        )
-                        detail = (
-                            f"'{nm}' is assigned a non-placeholder string literal; "
-                            "likely a committed credential."
-                        )
-                        if "mock-name" in tag_suffix:
-                            detail += (
-                                " The assignment NAME is mock/fake/test-shaped AND "
-                                "the file sits at a test-fixture path -- two "
-                                "corroborating signals, so this weaker name-based "
-                                "finding is demoted (not dropped). A value-shaped "
-                                "secret would still flag independently at HIGH."
-                            )
-                        elif "test-path" in tag_suffix:
-                            detail += (
-                                " The file also sits at a test-fixture path -- noted "
-                                "as context on an ALREADY-demoted finding; the bare "
-                                "path did not cause the demotion."
-                            )
-                        elif is_test_path:
-                            detail += (
-                                " The file sits at a test-fixture path, but a bare "
-                                "test path is target-controllable and does NOT demote "
-                                "on its own without a corroborating co-signal (e.g. a "
-                                "mock-shaped name) -- this finding keeps its base "
-                                "confidence."
-                            )
-                        if has_suppress_comment:
-                            detail += (
-                                " The line carries an author suppress-convention "
-                                "comment, which in adversarial/third-party scanning "
-                                "cannot be trusted to fully silence a finding -- "
-                                "confidence demoted instead."
-                            )
-                        if _has_fake_marker(value):
-                            detail += (
-                                " The value also contains an explicit fake/dummy/"
-                                "test/placeholder/sample/demo marker -- likely, but "
-                                "not provably, a test fixture; confidence demoted "
-                                "rather than the finding dropped."
-                            )
-                        out.append(Finding(
-                            vuln_class="hardcoded-secret",
-                            title=f"Hardcoded secret assigned to '{nm}'{tag_suffix}",
-                            severity=Severity.P1,
-                            confidence=(
-                                confidence if confidence == Confidence.LOW
-                                else Confidence.MEDIUM
-                            ),
-                            file=f.rel, line=node.lineno,
-                            detail=detail,
-                            remediation="Read from os.environ / a secret store; "
-                                        "rotate and scrub if this was ever real.",
-                            # Same honest-redaction change as the value-shape
-                            # branch above: reasons surfaced, value never.
-                            snippet=f"<redacted secret assignment{tag_suffix}>",
-                        ))
+                        # Round-3 N-vote P1 (B2) fix: this used to call raw
+                        # _SECRET_NAME.search(nm), bypassing the shared
+                        # _name_looks_secret helper's word-boundary guard AND
+                        # its pagination-cursor-name exclusion (OUR OWN
+                        # curated name-shape judgment, same "may fully
+                        # exclude" category as the placeholder list -- not a
+                        # target-controlled signal). 14 of awslabs/mcp's 209
+                        # revived-branch findings were pagination-named
+                        # assignments (`expected_response.next_token =
+                        # '...'`) that should never have reached this branch.
+                        # The guard now lives in _name_assignment_finding.
+                        name_assignments.append((_dotted(tgt), value, node.lineno))
+        elif f.suffix in js_util.JS_SUFFIXES:
+            name_assignments.extend(self._scan_js_name_assignments(f))
+        out.extend(self._name_assignment_findings(f, name_assignments, is_test_path))
+        return out
+
+    # --- shared by the Python-AST and JS/TS name branches -----------------
+    def _name_assignment_findings(self, f: SourceFile,
+                                  assignments: list[tuple[str, str, int]],
+                                  is_test_path: bool) -> list[Finding]:
+        """Every name-branch finding for one file, de-duplicated on
+        ``(name, value)``.
+
+        2026-07-30 (recall slice 3). Un-gating this branch onto JS/TS surfaced
+        a redundancy the Python side had always had and never hit hard: a test
+        file that re-pastes the SAME fixture credential into the SAME variable
+        for every case reported once per line. airtable-mcp-server's
+        ``src/enhanceAirtableError.test.ts`` assigns one value to ``apiKey``
+        seven times and another twice -- 17 findings from 9 distinct literals.
+
+        N copies of one literal in one file is ONE committed secret, not N.
+        This is a de-duplication, NOT a suppression: the finding is kept at its
+        FIRST occurrence and the repeat count is stated in its detail, so the
+        report still says everything the N separate records said. The repo's
+        one law is intact.
+        """
+        counts: dict[tuple[str, str], int] = {}
+        for nm, value, _ in assignments:
+            counts[(nm, value)] = counts.get((nm, value), 0) + 1
+
+        out: list[Finding] = []
+        seen: set[tuple[str, str]] = set()
+        for nm, value, lineno in assignments:
+            key = (nm, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            fin = self._name_assignment_finding(
+                f, nm, value, lineno, is_test_path, occurrences=counts[key])
+            if fin is not None:
+                out.append(fin)
+        return out
+
+    def _name_assignment_finding(self, f: SourceFile, nm: str, value: str,
+                                 lineno: int, is_test_path: bool,
+                                 occurrences: int = 1):
+        """One "NAME = <literal>" finding, or None when NAME is not
+        secret-shaped.
+
+        Extracted 2026-07-30 (recall slice 3) so the JS/TS branch and the
+        Python-AST branch cannot drift: the guards, the demotion
+        composition, the detail text, the severity and the redaction are ONE
+        implementation, and a grade on a .ts file therefore means exactly
+        what the same grade means on a .py file. Two parallel copies would
+        have diverged, which is what the invariant forbids.
+        """
+        if not (nm and _name_looks_secret(nm)):
+            return None
+        has_suppress_comment = bool(_SUPPRESS_COMMENT.search(f.line_at(lineno)))
+        # Name branch (base MEDIUM, weaker than the
+        # value-shape branch). Here test-path may pair with a
+        # mock/fake-shaped assignment NAME -- TWO independent
+        # signals -- to demote the wave-4 noise class
+        # (`mock_credentials.token = "..."`). This is SAFE for
+        # a real secret: if the assigned VALUE were value-shaped
+        # (AKIA/ghp_/...), the value-shape branch above already
+        # emitted a HIGH finding that a mock name cannot pull
+        # down; this branch only demotes the weaker name-based
+        # duplicate whose value is an arbitrary string. A mock
+        # name alone (no test path) does NOT demote.
+        #
+        # 2026-07-30 (recall slice 3): `non-credential-shape` is a STANDALONE
+        # demotion signal on this branch, where it is a co-signal on the
+        # value-shape branch above. The asymmetry is deliberate and follows
+        # _compose_demotion's own "self-limiting" bar. This branch's ONLY
+        # evidence is that the NAME looks secret; a value that is provably a
+        # lowercase, separator-joined word-phrase is direct counter-evidence
+        # against it being a credential at all. Measured cases: notion's
+        # `NOTION_TOKEN_HEADER = 'notion-token'` (a header NAME) and airtable's
+        # `apiKey = 'short-key'` test stub. On the value branch the value has
+        # already matched a high-signal credential PATTERN, so the same
+        # observation is weaker there and stays a co-signal. Demotion, never a
+        # drop: a real passphrase-shaped secret still appears, at LOW.
+        name_mock = _name_has_mock_marker(nm)
+        confidence, tag_suffix = _compose_demotion(
+            [
+                (has_suppress_comment, "author-suppressed"),
+                (_has_fake_marker(value), "fake-marker"),
+                (_is_non_credential_shape(value), "non-credential-shape"),
+            ],
+            is_test_path=is_test_path,
+            path_cosignals=[(name_mock, "mock-name")],
+        )
+        detail = (
+            f"'{nm}' is assigned a non-placeholder string literal; "
+            "likely a committed credential."
+        )
+        if occurrences > 1:
+            detail += (
+                f" The identical assignment appears {occurrences} times in this "
+                "file; it is reported once, at the first occurrence, because "
+                "N copies of one literal is one committed secret, not N. "
+                "Nothing is dropped -- the repeat count is this sentence."
+            )
+        if "non-credential-shape" in tag_suffix:
+            detail += (
+                " The assigned VALUE is a lowercase, separator-joined "
+                "word-phrase rather than a high-entropy credential, which is "
+                "direct counter-evidence on a finding whose only other "
+                "evidence is the variable's name -- so it is demoted (never "
+                "dropped)."
+            )
+        if "mock-name" in tag_suffix:
+            detail += (
+                " The assignment NAME is mock/fake/test-shaped AND "
+                "the file sits at a test-fixture path -- two "
+                "corroborating signals, so this weaker name-based "
+                "finding is demoted (not dropped). A value-shaped "
+                "secret would still flag independently at HIGH."
+            )
+        elif "test-path" in tag_suffix:
+            detail += (
+                " The file also sits at a test-fixture path -- noted "
+                "as context on an ALREADY-demoted finding; the bare "
+                "path did not cause the demotion."
+            )
+        elif is_test_path:
+            detail += (
+                " The file sits at a test-fixture path, but a bare "
+                "test path is target-controllable and does NOT demote "
+                "on its own without a corroborating co-signal (e.g. a "
+                "mock-shaped name) -- this finding keeps its base "
+                "confidence."
+            )
+        if has_suppress_comment:
+            detail += (
+                " The line carries an author suppress-convention "
+                "comment, which in adversarial/third-party scanning "
+                "cannot be trusted to fully silence a finding -- "
+                "confidence demoted instead."
+            )
+        if _has_fake_marker(value):
+            detail += (
+                " The value also contains an explicit fake/dummy/"
+                "test/placeholder/sample/demo marker -- likely, but "
+                "not provably, a test fixture; confidence demoted "
+                "rather than the finding dropped."
+            )
+        return Finding(
+            vuln_class="hardcoded-secret",
+            title=f"Hardcoded secret assigned to '{nm}'{tag_suffix}",
+            severity=Severity.P1,
+            confidence=(
+                confidence if confidence == Confidence.LOW
+                else Confidence.MEDIUM
+            ),
+            file=f.rel, line=lineno,
+            detail=detail,
+            remediation="Read from os.environ / a secret store; "
+                        "rotate and scrub if this was ever real.",
+            # Same honest-redaction change as the value-shape
+            # branch above: reasons surfaced, value never.
+            snippet=f"<redacted secret assignment{tag_suffix}>",
+        )
+
+    def _scan_js_name_assignments(
+        self, f: SourceFile,
+    ) -> list[tuple[str, str, int]]:
+        """JS/TS half of the name branch: every ``NAME = "literal"`` as
+        ``(name, value, lineno)``, for ``_name_assignment_findings`` to judge.
+
+        SCOPE, stated with the pattern. This matches ASSIGNMENTS only --
+        ``const/let/var NAME = "..."``, ``NAME = "..."``, ``obj.NAME =
+        "..."`` -- which is exactly the scope of the Python branch's
+        ``ast.Assign``. Two shapes are deliberately excluded:
+
+        * **Object properties** (``{ apiKey: "..." }``). Python's branch never
+          looks inside a dict literal, so admitting them would make the JS
+          grade mean something the Python grade does not -- and would fire on
+          every options/config object literal in a repo.
+        * **Comparisons** (``if (apiKey === "literal")``). Treating the ``=``
+          of ``===`` as an assignment would flag every credential CHECK. The
+          regex requires the ``=`` not be part of ``==``/``===``/``!=``/
+          ``<=``/``>=``/``+=``.
+
+        Comment lines are skipped and trailing comments stripped via
+        ``js_util``; the value itself is read from the source line, never
+        echoed into the finding (``_name_assignment_finding`` redacts).
+        """
+        out: list[tuple[str, str, int]] = []
+        for i, raw in enumerate(f.lines, start=1):
+            if js_util.is_comment_line(raw):
+                continue
+            line = js_util.code_part(raw)
+            for m in _JS_SECRET_ASSIGN.finditer(line):
+                value = m.group("value").strip()
+                if _is_known_placeholder_secret(value):
+                    continue
+                if _PLACEHOLDER.fullmatch(value) or len(value) < 8:
+                    continue
+                out.append((m.group("name"), value, i))
         return out
 
     def _scan_logging(self, f: SourceFile) -> list[Finding]:
