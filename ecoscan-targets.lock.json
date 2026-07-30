@@ -1,0 +1,93 @@
+{
+  "_comment": "Pinned third-party targets behind the held-out precision measurement reported in README.md. This file exists because the 2026-07-29 measurement retained no evidence -- no target SHAs, no scan artifacts -- which made a public claim unreproducible. Every target below was re-cloned, re-scanned at the recorded SHA, and every finding hand-audited to ground truth on 2026-07-30. These repo names are already disclosed in README.md; pinning them here adds no new disclosure and is required for the claim to be checkable. Do NOT delete a row when a target moves upstream -- add a new dated block, so the before/after stays meaningful.",
+  "measurement": {
+    "date_utc": "2026-07-30",
+    "scanner_sha": "b508e1c",
+    "scanner_analysis_code_identical_to": "2d93061",
+    "scanner_analysis_note": "git diff 2d93061 b508e1c -- mcp_scanner/ is empty: the commits between the 2026-07-29 measurement and this one touched only CI, README frontmatter, and the PyPI distribution name. Zero analysis code changed, so this run is comparable to the 07-29 figures.",
+    "totals": {
+      "findings": 53,
+      "true_positives": 0,
+      "false_positives": 53,
+      "undecidable": 0
+    },
+    "method": "Per target: read the detector source to enumerate the real sink list (never assumed), clone upstream at the recorded SHA, run `PYTHONPATH=. python -m mcp_scanner.cli <clone>`, then ground-truth EVERY finding by reading the flagged code and its callers independently of the scanner. A finding counts REAL only if attacker-controlled input can actually reach the sink in a way that matters."
+  },
+  "targets": [
+    {
+      "name": "notion-mcp-server",
+      "url": "https://github.com/makenotion/notion-mcp-server",
+      "sha": "1d38420769c8a1fe2d583ff1e7d2d108d4eb0b30",
+      "commit_date": "2026-07-25",
+      "language": "TypeScript",
+      "findings": 2,
+      "true_positives": 0,
+      "provably_07_29_state": true,
+      "pin_note": "No commits since 2026-07-25, four days before the measurement. Proves the tip did not move; does not prove the original run pinned the tip, since no SHA was recorded.",
+      "registration_pattern": "low-level SDK: setRequestHandler(CallToolRequestSchema, ...)",
+      "tools_detected": 0
+    },
+    {
+      "name": "mcp-server-neon",
+      "url": "https://github.com/neondatabase/mcp-server-neon",
+      "sha": "5de25551d31ddb481a53f48834d0df8059c8de0e",
+      "commit_date": "2026-07-28",
+      "language": "TypeScript",
+      "findings": 7,
+      "true_positives": 0,
+      "provably_07_29_state": true,
+      "pin_note": "Tip predates the measurement by one day and nothing has landed since.",
+      "registration_pattern": "loop: availableTools.forEach(tool => server.tool(tool.name, ...))",
+      "tools_detected": 1,
+      "tools_actual": 35,
+      "tools_note": "The one detected registration is named '(inline)' -- the regex matched the call but captured no name, because the first argument is a variable."
+    },
+    {
+      "name": "mcp-server-qdrant",
+      "url": "https://github.com/qdrant/mcp-server-qdrant",
+      "sha": "f1a4d04e4f91c4d3e2b7c63d5283f3f4338fd2e5",
+      "commit_date": "2026-06-10",
+      "language": "Python",
+      "findings": 0,
+      "true_positives": 0,
+      "provably_07_29_state": true,
+      "pin_note": "Zero commits since 2026-06-10, so the state on 07-29 and today are identical.",
+      "registration_pattern": "FastMCP subclass: self.tool(func, name=..., description=...)",
+      "tools_detected": 0,
+      "tools_actual": 2,
+      "clean_bill_verdict": "CORRECT, verified independently",
+      "clean_bill_note": "All 15 non-test .py files read plus a grep for the full sink list: zero matches. Both tools route only through qdrant_client's async API. The clean bill is right, not a false negative. This is the only Python target, and the Python precision layer has therefore been correctly silent once and never yet tested against a Python target containing a reachable sink."
+    },
+    {
+      "name": "firecrawl-mcp-server",
+      "url": "https://github.com/firecrawl/firecrawl-mcp-server",
+      "sha": "7c764ef6749486c60d33ad2a8370f1e8910348b6",
+      "commit_date": "2026-07-29",
+      "language": "TypeScript",
+      "findings": 33,
+      "true_positives": 0,
+      "provably_07_29_state": true,
+      "pin_note": "The exact 07-29 pin was unrecorded, so it was bounded instead: all three candidate tips that existed at any point on 2026-07-29 local (a92811a, 7ed0e6b, 7c764ef) produce byte-identical results -- 33 findings, P0=0 P1=12 P2=21. The pin question is moot for this target.",
+      "registration_pattern": "fastmcp TS SDK: server.addTool({ ... })",
+      "tools_detected": 0,
+      "tools_actual": 40
+    },
+    {
+      "name": "airtable-mcp-server",
+      "url": "https://github.com/domdomegg/airtable-mcp-server",
+      "sha": "e8b6dc621858becb6e685cab57d00fb2b0cf0ba9",
+      "commit_date": "2026-07-27",
+      "tag": "1.14.0",
+      "language": "TypeScript",
+      "findings": 11,
+      "true_positives": 0,
+      "provably_07_29_state": true,
+      "pin_note": "Provably the 07-29 state on BOTH sides: the target has not moved since 07-27, and the scanner's analysis code is unchanged since 2d93061.",
+      "registration_pattern": "current MCP TS SDK: server.registerTool(name, config, handler)",
+      "tools_detected": 0,
+      "tools_actual": 16,
+      "tools_note": "_JS_TOOL_RE matches only the DEPRECATED server.tool() API. This repo uses the current registerTool() API in all 16 src/tools/*.ts files."
+    }
+  ],
+  "_recall_note": "The 0/53 figure measures PRECISION -- of what was reported, none was real. It says nothing about recall, and the hand audit found real security-relevant issues the scanner missed entirely: an unauthenticated all-interfaces HTTP transport and a committed live-format credential in airtable-mcp-server, an unbounded local file read in firecrawl-mcp-server, and a latent unguarded path read in notion-mcp-server. In two of those cases the scanner OWNS a detector for the class (auth_posture, secret_handling's name-based branch) but gates it on a Python AST and so never runs it on .ts. Do not quote 0/53 as evidence of a clean result on these repos; it is evidence about the findings that were produced, not about the repos."
+}
