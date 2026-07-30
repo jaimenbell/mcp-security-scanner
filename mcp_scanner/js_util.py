@@ -120,6 +120,75 @@ def first_call_arg(text: str, open_paren_idx: int) -> str:
     return text[start:i]
 
 
+def call_args(text: str, open_paren_idx: int) -> list[str]:
+    """Best-effort text of every top-level argument after the '(' at
+    ``open_paren_idx``.
+
+    Same balancing/string-skipping rules as ``first_call_arg`` (of which this
+    is the generalisation), and the same line-scoped limit: an argument list
+    that wraps onto following lines is truncated at the end of this line.
+    Truncation loses arguments, so a caller must treat a SHORT list as "not
+    known to be present", never as "proved absent".
+    """
+    args: list[str] = []
+    depth = 0
+    i = open_paren_idx + 1
+    start = i
+    n = len(text)
+    in_str: str | None = None
+    while i < n:
+        c = text[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c in "'\"`":
+            in_str = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0 and c == ")":
+                args.append(text[start:i])
+                return args
+            depth -= 1
+        elif c == "," and depth == 0:
+            args.append(text[start:i])
+            start = i + 1
+        i += 1
+    args.append(text[start:i])
+    return args
+
+
+_STR_LITERAL = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`""")
+
+
+def code_only(line: str) -> str:
+    """``line`` with any trailing comment AND the CONTENTS of every string /
+    template literal removed (the quotes are kept so the line still parses as
+    a call shape).
+
+    For "is there any evidence of X in this file" judgements, which
+    ``code_part`` alone cannot answer honestly: a substring test over raw text
+    counts a word appearing in a log message, an error string, a tool
+    description or a comment as evidence of the thing it names.  The
+    2026-07-30 audit found both directions of that failure -- ``"resolve"``
+    matching ``Promise.resolve`` in 43% of one target's files, and, in
+    airtable's ``main.ts``, the console warning *"HTTP transport has no
+    authentication"* being the only thing in the file that contains the word
+    ``auth``.  Matching the raw text there would have let a warning ABOUT
+    missing auth stand as proof that auth exists.
+    """
+    if is_comment_line(line):
+        return ""
+    return _STR_LITERAL.sub(lambda m: m.group(0)[0] * 2, code_part(line))
+
+
 _CONST_STR = re.compile(r"""^(['"`])((?:\\.|(?!\1).)*)\1$""", re.DOTALL)
 
 
