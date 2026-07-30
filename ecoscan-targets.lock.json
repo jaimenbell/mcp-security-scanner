@@ -30,7 +30,38 @@
       "airtable-mcp-server src/main.ts:54 -- network-exposure, P1/medium: app.listen(port, callback) with no host argument binds all interfaces, serving POST /mcp with no auth, no Origin validation and no DNS-rebinding protection. Detected by argument SHAPE; no '0.0.0.0' string exists in the file.",
       "airtable-mcp-server src/e2e.test.ts:23 -- hardcoded-secret, P1/low, graded cli-only: a committed live-format Airtable PAT. Correctly excluded from the default --fail-on gate by the test-path grade."
     ],
-    "gate_note": "--fail-on P1 against airtable now counts exactly one finding: src/main.ts:54.",
+    "gate_note": "--fail-on P1 against airtable now counts exactly one finding: src/main.ts:54. Caveat recorded on re-verification: the CLI short-circuits on the first qualifying finding and never prints a gate count, so 'exactly one' is derived from the JSON output, not reported by the tool. Of airtable's 17 P0/P1 findings, 16 are graded cli-only (6 shell-injection, 1 hardcoded-secret in e2e.test.ts, 9 hardcoded-secret in enhanceAirtableError.test.ts) and are excluded from the default gate.",
+    "independent_reverification_2026_07_30": {
+      "_comment": "The 88/2 totals above were re-derived from scratch by a second pass at scanner HEAD a5768d5, BEFORE they were published to README.md. Recorded here because the first measurement retained no per-target split, which made the total unfalsifiable -- the same defect this whole lock file exists to fix.",
+      "scanner_sha": "a5768d5",
+      "comparability": "git diff d3c9a9d a5768d5 -- mcp_scanner/ is EMPTY, so the re-run is directly comparable to the d3c9a9d measurement. scan_meta.scanner_version reads a5768d5 in every output.",
+      "per_target_findings": {
+        "notion-mcp-server": 11,
+        "mcp-server-neon": 10,
+        "mcp-server-qdrant": 0,
+        "firecrawl-mcp-server": 35,
+        "airtable-mcp-server": 32,
+        "sum": 88
+      },
+      "per_target_note": "This split is NEW data. The targets[] rows below carry the OLD b508e1c figures (2/7/0/33/11 = 53), and the followup block recorded only the bare total 88 with no split -- so an exact re-match of 88 from an independently-derived distribution is corroboration, not an echo. Every target SHA was re-verified against its pin before scanning; clones were made outside the repo tree so the lock file was never a scan input. Two passes returned byte-identical counts.",
+      "true_positive_grading": {
+        "src/main.ts:54": "CONFIRMED REAL. Second arg is a callback, not a host, so Node binds all interfaces; app.post('/mcp') is a mutating route; the only app.use is express.json (no auth middleware anywhere in non-test src/); transport is constructed with only sessionIdGenerator+enableJsonResponse, so no enableDnsRebindingProtection/allowedHosts/allowedOrigins. Zero 0.0.0.0 literals in the file, confirming shape-based detection. MITIGATION THAT MUST TRAVEL WITH THE CLAIM: opt-in via MCP_TRANSPORT=http (default is stdio), and upstream already discloses it at main.ts:56 and in their README -- a known accepted risk, not a hidden bug.",
+        "src/e2e.test.ts:23": "QUALIFIED. Value shape verified without echoing it: field AIRTABLE_API_KEY, pat prefix, length 82, exact match for pat[A-Za-z0-9]{14}\\.[a-f0-9]{64}, 31 distinct chars, no placeholder markers -- so 'live-format PAT' is accurate. BUT the two lines directly above it are an upstream comment declaring it a deliberately committed read-only token scoped to a dummy table of public test data; the scanner strips comments and cannot see it. Not a security incident. Upstream's scope claim was NOT tested -- exercising a third party's credential would be unauthorized. Do not quote '2 true positives' without this caveat; the number that describes real-world value is 1."
+      },
+      "tool_registration_reality": {
+        "_comment": "tool_registrations_found: true is a boolean that flips on >=1 registration. It is accurate and it over-reads badly. Extraction is exact on three targets and a near-total miss on two.",
+        "notion-mcp-server": {"detected": 1, "actual_estimated": 24, "quality": "unnamed (inline); actual derived from OpenAPI operation count in scripts/notion-openapi.json, an indirect estimate"},
+        "mcp-server-neon": {"detected": 4, "actual": 34, "quality": "all 4 unnamed (inline)"},
+        "mcp-server-qdrant": {"detected": 2, "actual": 2, "quality": "exact, named"},
+        "firecrawl-mcp-server": {"detected": 27, "actual": 27, "quality": "exact, named"},
+        "airtable-mcp-server": {"detected": 16, "actual": 16, "quality": "exact, named"},
+        "consequence": "Anything keying off the tool registry remains effectively blind on neon and notion."
+      },
+      "not_verified": [
+        "The honesty_note sub-breakdown (9 tool-scope-creep, 14 synthetic fixture credentials) was not independently audited.",
+        "Whether the airtable PAT is genuinely read-only and scoped as upstream claims."
+      ]
+    },
     "honesty_note": "Findings rose 53 -> 88. Most of the increase is NOT true positives: 9 tool-scope-creep on airtable's mutating tools, 14 synthetic fixture credentials in test files, and assorted P3 repo-level posture findings -- all graded or demoted appropriately and kept out of the default gate. The precision layer still does not exist for JS/TS; these fixes attacked recall."
   },
   "targets": [
