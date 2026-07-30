@@ -13,6 +13,26 @@
     },
     "method": "Per target: read the detector source to enumerate the real sink list (never assumed), clone upstream at the recorded SHA, run `PYTHONPATH=. python -m mcp_scanner.cli <clone>`, then ground-truth EVERY finding by reading the flagged code and its callers independently of the scanner. A finding counts REAL only if attacker-controlled input can actually reach the sink in a way that matters."
   },
+  "followup_2026_07_30_recall_fixes": {
+    "scanner_sha": "d3c9a9d",
+    "_comment": "The `measurement` block above is the baseline AT SCANNER b508e1c and is a historical record -- do NOT read it as current state. Three recall fixes landed the same day and changed the numbers.",
+    "fixes": [
+      "slice 1 (42b61da): tool-registry extraction for the five real registration idioms",
+      "slice 2 (5654cb3): un-gate auth_posture's text-shaped checks from the Python AST",
+      "slice 3 (d3c9a9d): un-gate secret_handling's name-based branch from the Python AST"
+    ],
+    "totals": {
+      "findings": 88,
+      "true_positives": 2
+    },
+    "tool_registrations_found": "now true on all five targets (was false on all five)",
+    "true_positives_found": [
+      "airtable-mcp-server src/main.ts:54 -- network-exposure, P1/medium: app.listen(port, callback) with no host argument binds all interfaces, serving POST /mcp with no auth, no Origin validation and no DNS-rebinding protection. Detected by argument SHAPE; no '0.0.0.0' string exists in the file.",
+      "airtable-mcp-server src/e2e.test.ts:23 -- hardcoded-secret, P1/low, graded cli-only: a committed live-format Airtable PAT. Correctly excluded from the default --fail-on gate by the test-path grade."
+    ],
+    "gate_note": "--fail-on P1 against airtable now counts exactly one finding: src/main.ts:54.",
+    "honesty_note": "Findings rose 53 -> 88. Most of the increase is NOT true positives: 9 tool-scope-creep on airtable's mutating tools, 14 synthetic fixture credentials in test files, and assorted P3 repo-level posture findings -- all graded or demoted appropriately and kept out of the default gate. The precision layer still does not exist for JS/TS; these fixes attacked recall."
+  },
   "targets": [
     {
       "name": "notion-mcp-server",
@@ -39,7 +59,7 @@
       "pin_note": "Tip predates the measurement by one day and nothing has landed since.",
       "registration_pattern": "loop: availableTools.forEach(tool => server.tool(tool.name, ...))",
       "tools_detected": 1,
-      "tools_actual": 35,
+      "tools_actual": 34,
       "tools_note": "The one detected registration is named '(inline)' -- the regex matched the call but captured no name, because the first argument is a variable."
     },
     {
@@ -70,7 +90,8 @@
       "pin_note": "The exact 07-29 pin was unrecorded, so it was bounded instead: all three candidate tips that existed at any point on 2026-07-29 local (a92811a, 7ed0e6b, 7c764ef) produce byte-identical results -- 33 findings, P0=0 P1=12 P2=21. The pin question is moot for this target.",
       "registration_pattern": "fastmcp TS SDK: server.addTool({ ... })",
       "tools_detected": 0,
-      "tools_actual": 40
+      "tools_actual": 27,
+      "tools_note": "28 `.addTool(` call sites across src/{index,monitor,research}.ts, minus index.ts:2966 `searchServer.addTool(guardHostedTool(tool))`, which re-registers tools already counted. The 40 first recorded here was a raw text count that included type aliases, `Parameters<typeof>`, a `.bind` rebinding and a proxy property."
     },
     {
       "name": "airtable-mcp-server",
