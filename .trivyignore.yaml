@@ -1,0 +1,51 @@
+# SCOPE CONTRACT -- read before adding a line here.
+#
+# This file suppresses trivy's SECRET scanner on exactly 3 known,
+# INTENTIONAL fixture locations that exist to test this project's OWN
+# secret-detection logic. They are not dependency CVEs: this repo has
+# `dependencies = []` in pyproject.toml and no lock file, so trivy's vuln
+# scanner has nothing to report against -- every CI finding trivy has
+# produced here so far came from its SECRET scanner firing on our own
+# fake test data (see tests/fixtures/vuln_secret/config.py,
+# tests/fixtures/vuln_secret_placeholder_coscoped/client_config.py, and
+# tests/test_secret_non_credential_shape.py).
+#
+# Each entry below is pinned to an EXACT (rule id, exact file path) pair --
+# never a directory glob such as "tests/**" or "tests/fixtures/**". That is
+# deliberate: a real credential accidentally committed anywhere else under
+# tests/ -- including a sibling fixture file one directory over -- must
+# still be caught and fail-visible. Widening any entry below to a glob (or
+# adding a bare `- id: <rule>` with no `paths:`, which ignores that rule
+# repo-wide) defeats the entire point of this file.
+#
+# If you need to allow a new intentional fixture, add its own exact
+# (id, path) pair below -- do not broaden an existing one, and do not
+# reuse an existing entry's path for an unrelated rule id.
+#
+# Covered (invisible to trivy): only the 4 exact (rule id, path) pairs
+#   listed below.
+# Still caught: the same rule id at any OTHER path; any OTHER rule id at
+#   these same paths (e.g. a real AWS key, private key, or Stripe token
+#   dropped into config.py or client_config.py would still fire); every
+#   other file in the repo, including every other tests/fixtures/*
+#   fixture (vuln_secret_placeholder, vuln_secret_placeholder_pragma_real_secret,
+#   vuln_secret_placeholder_unrelated_comment, vuln_secret_leak*, pem_material/*,
+#   etc. are all still fully scanned).
+#
+# Wired via .github/workflows/ci.yml `trivyignores: .trivyignore.yaml` --
+# trivy does NOT auto-load a *.yaml-suffixed ignorefile the way it
+# auto-loads a plain `.trivyignore`, so that CI input is required for this
+# file to take effect at all.
+secrets:
+  - id: github-pat
+    paths:
+      - "tests/fixtures/vuln_secret/config.py"
+  - id: github-pat
+    paths:
+      - "tests/fixtures/vuln_secret_placeholder_coscoped/client_config.py"
+  - id: github-pat
+    paths:
+      - "tests/test_secret_non_credential_shape.py"
+  - id: slack-access-token
+    paths:
+      - "tests/test_secret_non_credential_shape.py"
