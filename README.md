@@ -69,20 +69,22 @@ The scanner reads only git-tracked source (falling back to a filtered tree walk 
 
 ## The dogfood proof (`--self-audit`)
 
-The scanner is validated against **eight real, in-production MCP servers** — the strongest trust signal we can offer in a market that has been burned by simulated proof-of-work. Running `--self-audit` (live output, 2026-07-23):
+The scanner is validated against **eight real, in-production MCP servers** — the strongest trust signal we can offer in a market that has been burned by simulated proof-of-work. This is the acceptance test (`tests/test_self_audit.py`), reproducible yourself via `--self-audit` (see setup above): **P0=0 fleet-wide, 6 of 8 servers clean, 2 with findings** — `github-mcp` (2x P1/LOW, its own fake test tokens, honestly reported) and `discord-mcp` (1x P1/LOW, TEST_TOKEN fixture, honestly reported). No other server carries a P0 or P1; this 8/6/2 headline is the trust claim and is what the acceptance test pins.
+
+Illustrative sample run (2026-07-31 — a dated snapshot, not a live feed; per-server P2/ungraded counts drift run-to-run as detectors evolve and are deliberately **not** part of the trust claim above, only the P0/P1 headline is):
 
 ```
-CLEAN    mcp-factory   P0=0 P1=0 P2=0 P3=0   <- codegen-injection class fixed upstream 2026-07-21
-FINDINGS github-mcp    P0=0 P1=2 P2=0 P3=0   <- 2x P1/LOW: its own fake test tokens, honestly reported
-CLEAN    bus-mcp       P0=0 P1=0 P2=0 P3=0
-CLEAN    desktop-mcp   P0=0 P1=0 P2=1 P3=0   <- one P2/low heuristic note, clean bill
-CLEAN    rag-mcp       P0=0 P1=0 P2=1 P3=0   <- one P2/low heuristic note, clean bill
-FINDINGS discord-mcp   P0=0 P1=1 P2=0 P3=0   <- 1x P1/LOW: TEST_TOKEN fixture, honestly reported
-CLEAN    rails-mcp     P0=0 P1=0 P2=0 P3=0
-CLEAN    vllm-ops-mcp  P0=0 P1=0 P2=1 P3=0   <- one P2/low heuristic note, clean bill
+CLEAN    mcp-factory
+FINDINGS github-mcp    P1=2
+CLEAN    bus-mcp
+CLEAN    desktop-mcp
+CLEAN    rag-mcp
+FINDINGS discord-mcp   P1=1
+CLEAN    rails-mcp
+CLEAN    vllm-ops-mcp
 ```
 
-This is the acceptance test (`tests/test_self_audit.py`). Two notes on how to read it honestly: (1) the mcp-factory codegen-injection finding the original manual audit surfaced was genuinely fixed upstream (fleet drift reconciled 2026-07-21) — the detection class itself stays proven against `tests/fixtures/vuln_codegen`, and the test now pins current fleet reality (mcp-factory clean) rather than asserting a vuln that no longer exists. (2) The test's clean bar is "no HIGH/MEDIUM-confidence P0/P1": under the one law (below), a fleet repo whose own test fixtures embed an obviously-fake secret now shows a LOW-confidence P1 instead of zero findings — the severity-only `clean_bill` reports that as FINDINGS (github-mcp, discord-mcp above), which is the honest reading, and the test deliberately does not re-suppress it.
+Two notes on how to read it honestly: (1) the mcp-factory codegen-injection finding the original manual audit surfaced was genuinely fixed upstream (fleet drift reconciled 2026-07-21) — the detection class itself stays proven against `tests/fixtures/vuln_codegen`, and the test now pins current fleet reality (mcp-factory clean) rather than asserting a vuln that no longer exists. (2) The test's clean bar is "no HIGH/MEDIUM-confidence P0/P1": under the one law (below), a fleet repo whose own test fixtures embed an obviously-fake secret now shows a LOW-confidence P1 instead of zero findings — the severity-only `clean_bill` reports that as FINDINGS (github-mcp, discord-mcp above), which is the honest reading, and the test deliberately does not re-suppress it.
 
 ## Honest capability boundary
 
