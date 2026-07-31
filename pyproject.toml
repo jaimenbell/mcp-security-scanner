@@ -11,6 +11,27 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Jaime Bell" }]
 dependencies = []
+keywords = ["mcp", "model-context-protocol", "security", "static-analysis", "sast"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/jaimenbell/mcp-security-scanner"
+Repository = "https://github.com/jaimenbell/mcp-security-scanner"
+Issues = "https://github.com/jaimenbell/mcp-security-scanner/issues"
+Changelog = "https://github.com/jaimenbell/mcp-security-scanner/releases"
 
 [project.optional-dependencies]
 # cryptography is in dev (not just `certs`) so CI actually exercises the
