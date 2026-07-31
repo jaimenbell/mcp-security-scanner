@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaimenbell-mcp-security-scanner"
-version = "0.1.0"
+version = "0.3.0"
 description = "Static security scanner for MCP servers — codegen injection, tool-param injection, auth posture, secret handling."
 readme = "README.md"
 requires-python = ">=3.10"
