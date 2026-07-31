@@ -11,7 +11,7 @@ from .models import Finding, Severity, Confidence, Reachability, Taint, ScanResu
 from .scanner import scan_repo, build_context
 from .reporting import render_markdown, render_json
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 __all__ = [
     "Finding", "Severity", "Confidence", "Reachability", "Taint", "ScanResult",
     "scan_repo", "build_context", "render_markdown", "render_json",
