@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -239,24 +240,52 @@ def test_default_artifact_dirs_are_gitignored():
         assert r.returncode == 0, f"{probe} is NOT gitignored (rc={r.returncode})"
 
 
+def _dir_snapshot(p: Path) -> "set[tuple[str, int]] | None":
+    """Immediate children of ``p`` as (name, size) -- ``-1`` for a directory.
+    ``None`` when ``p`` does not exist, so absent and empty stay distinct.
+
+    Immediate children, not a full walk: a real scratch dir holds ~26 clones
+    over ~11.6k files, and the failure mode being guarded against removes
+    whole entries (a clone, or the dir itself), which this sees. The
+    artifacts dir is flat, so for it this IS a full content check.
+    """
+    if not p.exists():
+        return None
+    return {(c.name, c.stat().st_size if c.is_file() else -1)
+            for c in p.iterdir()}
+
+
 def test_full_run_leaks_no_target_name_into_tracked_files(tmp_path):
-    """End-to-end rail: run against SENTINEL-named targets writing to the
+    """End-to-end rail: run against SENTINEL-named targets writing UNDER the
     REAL default in-repo artifacts dir, then prove (a) every artifact is
     gitignored, (b) the tree stays clean, (c) no tracked file contains the
-    sentinel name."""
+    sentinel name.
+
+    SCOPE -- the run writes to a per-run subdirectory *of* the real
+    ``ecoscan-artifacts/`` / ``ecoscan-scratch/`` dirs, never to the dirs
+    themselves. Both .gitignore entries are directory patterns, so every
+    nested path inherits the ignore and the rail under test is unchanged;
+    what changes is that a previous scan's artifacts and its expensive
+    clones now survive the run. That survival is ASSERTED, not assumed --
+    the snapshots below fail if this test disturbs either production dir.
+    Before 2026-08-03 this test ``rmtree``d both, so it could not be run
+    without destroying real scan output and ~531 MB of clones.
+    """
     root = eco.repo_root()
-    out_dir = root / eco.DEFAULT_OUT_DIRNAME
-    scratch = root / eco.DEFAULT_SCRATCH_DIRNAME
-    # sanity: start clean
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
-    if scratch.exists():
-        shutil.rmtree(scratch)
+    prod_out = root / eco.DEFAULT_OUT_DIRNAME
+    prod_scratch = root / eco.DEFAULT_SCRATCH_DIRNAME
+    before_out = _dir_snapshot(prod_out)
+    before_scratch = _dir_snapshot(prod_scratch)
+
+    # Per-run subdirs: unique by construction, so the run starts empty
+    # without deleting anything.
+    run_id = uuid.uuid4().hex
+    out_dir = prod_out / f"_pytest-{run_id}"
+    scratch = prod_scratch / f"_pytest-{run_id}"
 
     # Runtime-unique target names so the sentinel provably cannot pre-exist
     # in ANY source file (incl. this test file) -- any appearance in a
     # tracked file is then unambiguously a leak the scan caused.
-    import uuid
     run_a = "ecoLEAKPROBE" + uuid.uuid4().hex
     run_b = "ecoLEAKPROBE" + uuid.uuid4().hex
     cfg = _write_config(tmp_path, [
@@ -300,10 +329,19 @@ def test_full_run_leaks_no_target_name_into_tracked_files(tmp_path):
         agg_md = (out_dir / "aggregate-report.md").read_text(encoding="utf-8")
         assert run_a not in agg_md and run_b not in agg_md
     finally:
-        if out_dir.exists():
-            shutil.rmtree(out_dir)
-        if scratch.exists():
-            shutil.rmtree(scratch)
+        # only ever this run's own subdirs
+        shutil.rmtree(out_dir, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+        # a checkout that had no artifacts dir keeps none
+        for parent, pre_existed in ((prod_out, before_out is not None),
+                                    (prod_scratch, before_scratch is not None)):
+            if not pre_existed and parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+
+    assert _dir_snapshot(prod_out) == before_out, \
+        "this test disturbed the REAL ecoscan-artifacts/"
+    assert _dir_snapshot(prod_scratch) == before_scratch, \
+        "this test disturbed the REAL ecoscan-scratch/"
 
 
 def test_run_emits_per_repo_reports_and_raw_results(tmp_path):
