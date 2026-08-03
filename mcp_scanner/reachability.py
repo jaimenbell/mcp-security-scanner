@@ -149,15 +149,58 @@ class CallGraph:
 
         Same-file callees are resolved exactly; a callee name that only exists
         in another file is followed best-effort (all repo-wide functions of that
-        name are treated as reachable — deliberately generous)."""
+        name are treated as reachable — deliberately generous).
+
+        Unchanged, deliberately: ``taint.propagate`` wants the generous set."""
+        return self.reachable_from_graded(roots)[0]
+
+    def reachable_from_graded(self, roots: list[ast.AST]) -> tuple[set[int], set[int]]:
+        """``(reachable, strongly_reachable)`` from the root handlers.
+
+        Same walk, same generosity — but it now records HOW each node was
+        reached, which the single-set version threw away.
+
+        * **reachable** — identical to ``reachable_from``. Any edge counts.
+        * **strongly_reachable** — reached by a path on which EVERY edge was
+          resolved exactly, i.e. caller and callee live in the same file. A
+          node in ``reachable`` but not in ``strongly_reachable`` was reached
+          *only* by guessing that a same-named function in some other file is
+          the one being called.
+
+        WHY (2026-08-03 hand-audit of the published ecosystem scan): the
+        cross-file name guess is one-to-MANY. One production ``sandbox.run(``
+        rooted in a registered tool promoted EVERY repo-wide ``run`` into the
+        reachable set — including two unshipped ``_UnsafeTestSandboxProvider``
+        test doubles in ``PrefectHQ/fastmcp``, which then occupied two of the
+        three P0 slots in the whole gate-qualifying queue. Because REACHABLE
+        is decided before the ``is_test_path`` fallback in ``_grade_one`` can
+        run, and REACHABLE also fires the ``_RAISE`` confidence nudge, the
+        guess inflated severity and defeated the ``--fail-on`` exclusion in
+        one step.
+
+        Keeping both sets rather than tightening the walk is the point: the
+        generous edge is still followed and still reported, so nothing is
+        silently dropped. Only the *grader* is told the difference, and only
+        it decides what to do about a weak-only path.
+        """
         visited: set[int] = set()
-        stack = [r for r in roots if r is not None]
+        strong: set[int] = set()
+        # (node, reached_by_an_all-exact-path). Roots are strong by definition.
+        stack: list[tuple[ast.AST, bool]] = [(r, True) for r in roots if r is not None]
         while stack:
-            node = stack.pop()
-            if id(node) in visited:
+            node, is_strong = stack.pop()
+            node_id = id(node)
+            # A node first reached weakly and later strongly must be expanded
+            # AGAIN, so strength propagates to its callees. Re-expansion is
+            # bounded: each node is expanded at most twice (once per flag).
+            if is_strong:
+                if node_id in strong:
+                    continue
+                strong.add(node_id)
+            elif node_id in visited:
                 continue
-            visited.add(id(node))
-            owner = self._node_file.get(id(node))
+            visited.add(node_id)
+            owner = self._node_file.get(node_id)
             for sub in ast.walk(node):
                 if not isinstance(sub, ast.Call):
                     continue
@@ -166,12 +209,22 @@ class CallGraph:
                 if not short:
                     continue
                 for callee in self._by_name.get(short, []):
-                    if id(callee) in visited:
+                    # Exact resolution == the callee lives in the caller's own
+                    # file. Anything else is the best-effort repo-wide guess,
+                    # so the path through it can never be strong.
+                    callee_owner = self._node_file.get(id(callee))
+                    edge_strong = (
+                        is_strong
+                        and owner is not None
+                        and callee_owner == owner
+                    )
+                    if edge_strong:
+                        if id(callee) in strong:
+                            continue
+                    elif id(callee) in visited:
                         continue
-                    # Prefer a same-file match; otherwise follow cross-file.
-                    stack.append(callee)
-            _ = owner  # reserved for future same-file-only tightening
-        return visited
+                    stack.append((callee, edge_strong))
+        return visited, strong
 
     def callers_outside(self, enclosing: ast.AST) -> list[tuple[str, int]]:
         """Every repo-wide call site that invokes ``enclosing`` by name,
@@ -261,12 +314,15 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
     )
 
     cg = CallGraph(ctx)
-    reachable_ids = cg.reachable_from(tool_nodes) if tool_nodes else set()
+    reachable_ids, strong_ids = (
+        cg.reachable_from_graded(tool_nodes) if tool_nodes else (set(), set())
+    )
 
     graded: list[Finding] = []
     for f in result.findings:
         label, evidence = _grade_one(f, ctx, cg, reachable_ids, has_tools,
-                                      bool(tool_nodes), unrooted_py_root)
+                                      bool(tool_nodes), unrooted_py_root,
+                                      strong_ids)
         conf = f.confidence
         if label is Reachability.REACHABLE:
             conf = _RAISE[f.confidence]
@@ -279,7 +335,8 @@ def grade_result(ctx: RepoContext, result: ScanResult) -> None:
 
 def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
                reachable_ids: set[int], has_tools: bool,
-               have_py_handlers: bool, unrooted_py_root: bool = False) -> tuple[Reachability, str]:
+               have_py_handlers: bool, unrooted_py_root: bool = False,
+               strong_ids: set[int] | None = None) -> tuple[Reachability, str]:
     """Call-graph grade first; path-shape fallback only where it said UNKNOWN.
 
     STRICT ORDERING (2026-07-29, and the point of the split): ``_grade_ast``
@@ -288,9 +345,18 @@ def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
     must never outrank the strongest -- a sink proven REACHABLE from a tool
     root does not stop being reachable because its file is named
     ``*.test.py``.
+
+    THAT ORDERING STANDS. What changed on 2026-08-03 is the definition of
+    "proven": a path made of best-effort cross-file NAME GUESSES was never
+    proof, and it was outranking the fallback on the strength of a guess.
+    ``_grade_ast`` now declines to call such a path REACHABLE *when the file
+    is also a test path* -- both conditions, never either alone -- so the
+    fallback gets asked the question it was written to answer. Real evidence
+    still wins; a guess no longer counts as real evidence.
     """
     label, evidence = _grade_ast(f, ctx, cg, reachable_ids, has_tools,
-                                 have_py_handlers, unrooted_py_root)
+                                 have_py_handlers, unrooted_py_root,
+                                 strong_ids)
     if label is not Reachability.UNKNOWN:
         return label, evidence
     # Nothing decidable from the call-graph -- for a non-Python surface that
@@ -307,7 +373,8 @@ def _grade_one(f: Finding, ctx: RepoContext, cg: CallGraph,
 
 def _grade_ast(f: Finding, ctx: RepoContext, cg: CallGraph,
                reachable_ids: set[int], has_tools: bool,
-               have_py_handlers: bool, unrooted_py_root: bool = False) -> tuple[Reachability, str]:
+               have_py_handlers: bool, unrooted_py_root: bool = False,
+               strong_ids: set[int] | None = None) -> tuple[Reachability, str]:
     if not has_tools:
         return Reachability.UNKNOWN, ""
     src = None
@@ -331,6 +398,24 @@ def _grade_ast(f: Finding, ctx: RepoContext, cg: CallGraph,
         # so we can't prove a Python call path either way.
         return Reachability.UNKNOWN, ""
     if id(enclosing) in reachable_ids:
+        # SCOPE, STATED WITH THE PATTERN (2026-08-03). Decline REACHABLE only
+        # where BOTH hold: the sink was reached SOLELY through best-effort
+        # cross-file name guesses (never an exactly-resolved same-file edge on
+        # any path from a root), AND the file is a test path. Either condition
+        # alone changes nothing:
+        #   * weak-only path in PRODUCTION code -> still REACHABLE. Recall on
+        #     the surface that matters is untouched, which is the whole reason
+        #     this is a two-condition rule and not a tightening of the walk.
+        #   * test path reached by a REAL same-file edge -> still REACHABLE,
+        #     which is the ordering pinned by
+        #     ``test_path_shape_never_overrides_a_real_call_graph_grade``.
+        # Returning UNKNOWN (not CLI_ONLY) keeps this function honest about
+        # what it knows and hands the decision to the existing path-shape
+        # fallback in ``_grade_one``, reusing that mechanism rather than
+        # inventing a parallel one.
+        weak_only = strong_ids is not None and id(enclosing) not in strong_ids
+        if weak_only and is_test_path(f.file):
+            return Reachability.UNKNOWN, ""
         return Reachability.REACHABLE, ""
     # Not reachable from any registered tool. Decide the finer-grained
     # question -- "does anything at all call this?" -- unless the repo
