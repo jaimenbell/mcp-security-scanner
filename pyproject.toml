@@ -9,7 +9,7 @@ description = "Static security scanner for MCP servers — codegen injection, to
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Jaime Bell" }]
+authors = [{ name = "Jaimen Bell" }]
 dependencies = []
 keywords = ["mcp", "model-context-protocol", "security", "static-analysis", "sast"]
 classifiers = [
@@ -32,6 +32,7 @@ Homepage = "https://github.com/jaimenbell/mcp-security-scanner"
 Repository = "https://github.com/jaimenbell/mcp-security-scanner"
 Issues = "https://github.com/jaimenbell/mcp-security-scanner/issues"
 Changelog = "https://github.com/jaimenbell/mcp-security-scanner/releases"
+Services = "https://jaimenbell.dev"
 
 [project.optional-dependencies]
 # cryptography is in dev (not just `certs`) so CI actually exercises the

@@ -140,3 +140,9 @@ unset (e.g. in a fresh clone or CI on another machine). See
 [ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.
 
 Each detector ships a matched pair of fixtures — a vulnerable one it must catch, a clean one it must not flag — so the false-positive floor is a tested invariant, not a hope.
+
+## Commercial support
+
+Maintained by [Jaimen Bell](https://jaimenbell.dev). For MCP server security
+reviews, managed scanning, or custom detector work, see
+[jaimenbell.dev](https://jaimenbell.dev).

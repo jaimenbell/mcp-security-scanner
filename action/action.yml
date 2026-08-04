@@ -21,7 +21,7 @@ description: >
   Static security scan for MCP servers: codegen injection, tool-parameter
   injection, auth posture, secret handling. Fails the build on findings at
   or above the configured severity. Your source never leaves your runner.
-author: "Jaime Bell"
+author: "Jaimen Bell"
 
 branding:
   icon: "shield"
