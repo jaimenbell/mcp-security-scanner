@@ -165,6 +165,123 @@ def _http_sink_url_args() -> dict[str, int]:
 
 _SSRF_SINK_URL_ARG = _http_sink_url_args()
 
+# The same method -> URL-arg-index surface, keyed by BARE method name, for
+# calls on a receiver already PROVEN to be an HTTP client (see
+# `_http_client_receivers`). Never consulted without that proof -- on its own
+# this dict is exactly the short-name matcher exclusion 1 above forbids.
+_INSTANCE_SINK_URL_ARG: dict[str, int] = (
+    {verb: 0 for verb in _HTTP_VERB_METHODS} | {"request": 1, "stream": 1}
+)
+
+# --- receiver binding: which instances ARE HTTP clients -------------------
+# Closes exclusion 3 above, and closes it with evidence rather than a guess.
+#
+# WHAT IT MATCHES: a receiver name that this file itself binds to a call of a
+# known HTTP client constructor -- `client = httpx.Client()`,
+# `self._http = httpx.AsyncClient()`, `async with aiohttp.ClientSession() as
+# cs`. The binding is the evidence; the identifier is never the evidence.
+#
+# WHY it is needed: the module-qualified surface above misses the dominant
+# real-world shape. Measured on this repo's own 13-repo ecoscan corpus:
+# 75 client constructors against 48 module-level calls. aiohttp is the
+# extreme case -- it has no module-level verb helpers at all (they were
+# removed in 3.0), so `ClientSession()` is its ONLY shape and the entire
+# library was invisible to this detector.
+#
+# WHERE IT APPLIES -- and the exclusions here are the load-bearing part,
+# because this is the rule with real false-positive exposure:
+#
+#   1. SAME FILE ONLY. A binding in another module is not consulted. This
+#      matches the bound this scanner already holds itself to elsewhere
+#      (`_resolve_receiver_kind` on the JS path) and keeps the analysis
+#      decidable from one AST.
+#   2. CONSTRUCTED, not named. A parameter called `client`, or any name whose
+#      binding is not visible here, resolves to nothing and flags nothing.
+#      Trusting the identifier is the single most tempting shortcut and the
+#      most expensive: `get`/`put`/`delete`/`patch`/`head`/`options`/`request`
+#      are among the commonest method names in Python, and on the same corpus
+#      a bare short-name match reaches ~12,400 candidate call sites against
+#      198 real ssrf findings -- a ~63x flood. Even restricting to receivers
+#      *named* client/session/http still gives 430 sites off a pure guess.
+#   3. CONFLICTING BINDINGS FAIL QUIET. If a name is bound to an HTTP client
+#      somewhere in the file and to anything else somewhere else, it is
+#      dropped -- neither use is flagged. Note this is the OPPOSITE default
+#      from `_js_is_real_exec_call`, which keeps an unresolved receiver
+#      flagged: there, the sink was already established and the unresolved
+#      case is a possible miss of a known-real finding; here, resolving
+#      wrongly MANUFACTURES a finding class that did not exist. One honest
+#      miss costs less than a class of false positives, so the direction
+#      flips with the direction of the error.
+#      "Anything else" deliberately includes FUNCTION PARAMETERS, loop
+#      targets, `except ... as`, and imports -- every binding form that is
+#      not a client constructor. The resolution is file-wide, not per-scope,
+#      so without this a `client = httpx.Client()` in one function would leak
+#      its meaning onto an unrelated `def handler(client, ...)` parameter in
+#      the next one and flag a receiver nothing in the file describes. (That
+#      is not hypothetical: it is what the first implementation of this rule
+#      did, caught by test_a_parameter_shadowing_a_bound_name_is_not_flagged.)
+#      Per-scope resolution would recover those misses, but file-wide-plus-
+#      conflict is decidable in one pass and errs in the quiet direction.
+#   4. NOT `client.send(request)`. httpx's `send` takes a prepared Request
+#      object, so there is no URL argument to judge -- including it would
+#      mean flagging on the method name alone, i.e. exclusion 2.
+#   5. Python AST only. The JS/TS path is untouched, for the reasons already
+#      given in the verb-calibration scope block above.
+_HTTP_CLIENT_CONSTRUCTORS = frozenset({
+    "httpx.Client", "httpx.AsyncClient",
+    "requests.Session", "requests.sessions.Session",
+    "aiohttp.ClientSession",
+})
+
+
+def _note_binding(target: ast.AST, value: ast.AST,
+                  http: set[str], other: set[str]) -> None:
+    """Record one binding as HTTP-client or as anything-else."""
+    name = _dotted(target)
+    if not name:
+        return
+    constructed = _dotted(value.func) if isinstance(value, ast.Call) else ""
+    (http if constructed in _HTTP_CLIENT_CONSTRUCTORS else other).add(name)
+
+
+def _http_client_receivers(tree: ast.AST) -> frozenset[str]:
+    """Receiver names this file proves are HTTP clients.
+
+    A name bound to a client constructor AND to anything else in the same
+    file is ambiguous and is excluded -- see exclusion 3 above.
+    """
+    http: set[str] = set()
+    other: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                _note_binding(target, node.value, http, other)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            _note_binding(node.target, node.value, http, other)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _note_binding(item.optional_vars, item.context_expr,
+                                  http, other)
+        # Every OTHER way a name can come to exist is conflicting evidence
+        # (exclusion 3): the resolution is file-wide, so a parameter or loop
+        # target sharing a name with a client elsewhere must cancel it out.
+        elif isinstance(node, ast.arg):
+            other.add(node.arg)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            other.add(_dotted(node.target))
+        elif isinstance(node, ast.comprehension):
+            other.add(_dotted(node.target))
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                other.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef)):
+            other.add(node.name)
+    return frozenset(http - other)
+
 # --- JS/TS parity sinks --------------------------------------------------
 # Regex/line-based (see js_util's honesty note) -- there is no JS/TS AST in
 # this scanner. Mirrors the same sink classes the Python AST pass checks:
@@ -575,10 +692,12 @@ class ParamInjectionDetector(Detector):
             text = f.text
             has_containment = any(h in text for h in _CONTAINMENT_HINTS)
             has_allowlist = any(h in text for h in _ALLOWLIST_HINTS)
+            http_clients = _http_client_receivers(f.tree)
             for node in ast.walk(f.tree):
                 if isinstance(node, ast.Call):
                     findings.extend(
-                        self._check_call(node, f, has_containment, has_allowlist)
+                        self._check_call(node, f, has_containment,
+                                         has_allowlist, http_clients)
                     )
         return findings
 
@@ -725,7 +844,8 @@ class ParamInjectionDetector(Detector):
         return False
 
     def _check_call(
-        self, node: ast.Call, f: SourceFile, has_containment: bool, has_allowlist: bool
+        self, node: ast.Call, f: SourceFile, has_containment: bool,
+        has_allowlist: bool, http_clients: frozenset[str] = frozenset(),
     ) -> list[Finding]:
         out: list[Finding] = []
         name = _dotted(node.func)
@@ -811,6 +931,14 @@ class ParamInjectionDetector(Detector):
         # concludes "constant, not caller-influenced" and reports nothing --
         # while the caller-controlled URL sits untouched right beside it.
         url_arg = _SSRF_SINK_URL_ARG.get(name)
+        if url_arg is None:
+            # Instance call on a receiver this file PROVED is an HTTP client.
+            # `http_clients` is the whole gate -- see _HTTP_CLIENT_CONSTRUCTORS
+            # above. Without a binding hit, `_INSTANCE_SINK_URL_ARG` is never
+            # consulted and a bare `.put(` on an unknown receiver stays silent.
+            receiver, _, method = name.rpartition(".")
+            if receiver and receiver in http_clients:
+                url_arg = _INSTANCE_SINK_URL_ARG.get(method)
         if url_arg is not None and len(node.args) > url_arg:
             if not _is_constant_str(node.args[url_arg]) and not has_allowlist:
                 # HTTP-verb calibration. See _STATE_CHANGING_VERBS above for
