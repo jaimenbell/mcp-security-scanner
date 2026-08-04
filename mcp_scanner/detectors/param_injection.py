@@ -96,6 +96,75 @@ def _stated_http_verb(sink_name: str) -> str | None:
         return verb
     return None
 
+
+# --- the `ssrf` HTTP sink surface ----------------------------------------
+# WHAT IT MATCHES and WHERE IT APPLIES, stated together, same as above.
+#
+# WHAT: a call whose FULL dotted name -- the whole attribute chain as
+# `_dotted` renders it -- is exactly `<known http module>.<request method>`.
+# The literal source text `httpx.put(` or `requests.patch(`, nothing else.
+# Each entry maps to the INDEX of that method's URL argument, because the two
+# call shapes disagree about it: the verb-named helpers take the URL first,
+# while `request`/`stream` take `(method, url)` and take it second.
+#
+# WHY it is generated per module rather than hand-listed per method: the
+# hand-list this replaces named `httpx.get` and `httpx.post` and stopped. The
+# other five httpx verb helpers, plus `requests.patch`/`requests.options`,
+# were not merely unreported -- they were structurally undetectable, so they
+# could never be verb-calibrated either, and the entire calibration suite
+# above stayed green over a half-blind matcher. A per-method hand-list is
+# correct on the day it is written and silently incomplete forever after.
+#
+# WHERE IT APPLIES -- three exclusions, each for a stated reason:
+#
+#   1. MODULE-QUALIFIED names ONLY, never a bare short name. `get`, `put`,
+#      `delete`, `patch`, `head`, `options` and `request` are among the most
+#      common method names in Python generally. Matching on `short` -- the
+#      way the subprocess branch in `_check_call` legitimately does for its
+#      own much rarer names -- would flag every `queue.put(item)`,
+#      `session.delete(row)` and `cache.get(key)` in every repo scanned.
+#      That is the same substring-scope error exclusion 3 of the verb rule
+#      above already fences `tool_scope_creep._MUTATING_SINK_SHORT` off from,
+#      and buying recall that way would cost far more precision than the
+#      recall is worth.
+#   2. PER-MODULE, not a module x method cross-product. `requests` has no
+#      `.stream`; listing `requests.stream` would add a sink that can never
+#      fire -- a claim of coverage the code does not actually have.
+#   3. NOT receiver-bound instance calls. `client.put(url)` where
+#      `client = httpx.Client()`, `session.post(url)` on a
+#      `requests.Session()`, and the whole of `aiohttp` (whose only real API
+#      shape is `ClientSession().get(...)` -- module-level `aiohttp.get` was
+#      removed in 3.0 and listing it would violate exclusion 2) are GENUINE
+#      sinks that this matcher does NOT cover. Reaching them needs same-file
+#      receiver binding to resolve what the receiver was constructed from,
+#      the way `_resolve_receiver_kind` does on the JS path. Approximating it
+#      by matching the short name instead lands straight back on exclusion 1,
+#      so the gap stays open and stated rather than closed by a guess.
+#
+# Also uncovered, and for the same reason -- named so it is a known limit and
+# not a surprise: import aliases (`import httpx as hx; hx.put(url)` renders
+# as `hx.put`; this branch does no alias resolution, unlike
+# `tool_scope_creep._resolved_sink_name`), and keyword-passed URLs
+# (`httpx.get(url=user_url)` puts nothing in `node.args`).
+_HTTP_VERB_METHODS = ("get", "options", "head", "post", "put", "patch", "delete")
+
+
+def _http_sink_url_args() -> dict[str, int]:
+    """Map each HTTP sink's dotted name to the index of its URL argument."""
+    surface: dict[str, int] = {}
+    for module, method_first in (("requests", ("request",)),
+                                 ("httpx", ("request", "stream"))):
+        for verb in _HTTP_VERB_METHODS:
+            surface[f"{module}.{verb}"] = 0
+        for name in method_first:
+            surface[f"{module}.{name}"] = 1
+    surface["urllib.request.urlopen"] = 0
+    surface["urlopen"] = 0
+    return surface
+
+
+_SSRF_SINK_URL_ARG = _http_sink_url_args()
+
 # --- JS/TS parity sinks --------------------------------------------------
 # Regex/line-based (see js_util's honesty note) -- there is no JS/TS AST in
 # this scanner. Mirrors the same sink classes the Python AST pass checks:
@@ -735,12 +804,15 @@ class ParamInjectionDetector(Detector):
                 ))
 
         # --- HTTP fetch of a non-constant URL -> SSRF ------------------
-        if name in (
-            "requests.get", "requests.post", "requests.put", "requests.delete",
-            "requests.head", "requests.request", "httpx.get", "httpx.post",
-            "urllib.request.urlopen", "urlopen",
-        ):
-            if node.args and not _is_constant_str(node.args[0]) and not has_allowlist:
+        # See _SSRF_SINK_URL_ARG above for the surface and its scope. The
+        # mapped index matters: for `requests.request(method, url)` and
+        # `httpx.stream("GET", url)` the URL is the SECOND argument, so a
+        # matcher that inspects arg[0] reads the literal method string,
+        # concludes "constant, not caller-influenced" and reports nothing --
+        # while the caller-controlled URL sits untouched right beside it.
+        url_arg = _SSRF_SINK_URL_ARG.get(name)
+        if url_arg is not None and len(node.args) > url_arg:
+            if not _is_constant_str(node.args[url_arg]) and not has_allowlist:
                 # HTTP-verb calibration. See _STATE_CHANGING_VERBS above for
                 # the rule and its scope; severity moves, confidence does not.
                 sev = Severity.P2
