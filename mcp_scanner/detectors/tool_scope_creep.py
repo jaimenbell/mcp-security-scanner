@@ -806,6 +806,17 @@ def _class_methods_in_file(f: SourceFile) -> dict[tuple[str, str], ast.AST]:
     return out
 
 
+def _class_names_in_file(f: SourceFile) -> set[str]:
+    """Every ``ClassDef`` name in file ``f`` (any nesting depth) -- used to
+    decide whether a constructor call names a class this file actually
+    defines. Broader than ``_class_methods_in_file``'s keys on purpose: a
+    class with no methods of its own is still a class, and answering "is
+    this a class here?" must not depend on whether it has members."""
+    if f.tree is None:
+        return set()
+    return {n.name for n in ast.walk(f.tree) if isinstance(n, ast.ClassDef)}
+
+
 def _enclosing_class_name(f: SourceFile, node: ast.AST) -> str | None:
     """Name of the ``ClassDef`` whose body directly contains ``node`` as a
     method, or ``None`` -- used only for the cheap ``self.``/``cls.``
@@ -817,6 +828,114 @@ def _enclosing_class_name(f: SourceFile, node: ast.AST) -> str | None:
         if isinstance(candidate, ast.ClassDef) and node in candidate.body:
             return candidate.name
     return None
+
+
+def _local_binding_values(f: SourceFile, calling_node: ast.AST, name: str) -> list[ast.AST]:
+    """Every value ``name`` is assigned in a BOUNDED pair of scopes: inside
+    ``calling_node``'s own body first, else file-module level.
+
+    Deliberately two scopes and no more. Module level is read from
+    ``f.tree.body`` DIRECTLY rather than by walking -- a walk would descend
+    into every other function and class body in the file and collect
+    unrelated locals that merely share the name, manufacturing the exact
+    kind of namesake confusion this whole fix exists to remove.
+
+    Local shadows module (real Python scoping): when the enclosing body binds
+    the name at all, the module-level binding is not consulted."""
+    local: list[ast.AST] = []
+    for node in ast.walk(calling_node):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    local.append(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id == name
+                and node.value is not None
+            ):
+                local.append(node.value)
+    if local:
+        return local
+
+    module: list[ast.AST] = []
+    if f.tree is None:
+        return module
+    for stmt in f.tree.body:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    module.append(stmt.value)
+        elif isinstance(stmt, ast.AnnAssign):
+            if (
+                isinstance(stmt.target, ast.Name)
+                and stmt.target.id == name
+                and stmt.value is not None
+            ):
+                module.append(stmt.value)
+    return module
+
+
+def _instance_receiver_class(
+    f: SourceFile,
+    calling_node: ast.AST,
+    name: str,
+    import_map: dict[str, tuple[SourceFile, str | None]],
+) -> tuple[bool, tuple[SourceFile, str] | None]:
+    """Resolve a bare ``Name`` receiver that is an INSTANCE, not a class.
+
+    Returns ``(is_instance, target)``:
+
+      * ``(False, None)`` -- ``name`` is not provably an instance in the two
+        bounded scopes above (no binding, or bound to something other than a
+        constructor call). The caller keeps its pre-existing behaviour.
+      * ``(True, (file, ClassName))`` -- provably an instance of a class this
+        pass can actually point at, in this file or in the file an explicit
+        same-repo import bound the class from (``_build_import_map``).
+      * ``(True, None)`` -- provably an instance, class NOT resolvable (a
+        third-party class, a factory return, or two bindings that disagree).
+
+    The third case is the one that matters, and it is why this returns a
+    PAIR rather than an optional target. "Provably an instance" is itself a
+    hard, useful fact even when the class is a mystery: it proves the
+    receiver is not a class and not a module in this file, which proves the
+    same-file bare-name fallback would be resolving a namesake rather than
+    this call. The caller must treat ``(True, None)`` as an honest miss and
+    stop -- see ``_resolve_call_targets`` step 2b.
+
+    Scope, stated with the pattern: only a binding to a CALL counts as
+    instance evidence (``x = Thing()``). ``x = Thing`` (a class alias),
+    ``x = 5``, and an unbound name are all left alone for the caller's
+    existing path -- narrowing those is not this slice's job."""
+    values = _local_binding_values(f, calling_node, name)
+    ctor_calls = [v for v in values if isinstance(v, ast.Call)]
+    if not values or len(ctor_calls) != len(values):
+        return False, None
+
+    ctor_names = {_dotted(v.func) for v in ctor_calls}
+    if len(ctor_names) != 1:
+        return True, None                                    # disagreeing bindings
+    ctor = ctor_names.pop()
+    if not ctor:
+        return True, None
+    parts = ctor.split(".")
+
+    if len(parts) == 1:
+        cls = parts[0]
+        if cls in _class_names_in_file(f):
+            return True, (f, cls)
+        if cls in import_map:
+            target_file, symbol = import_map[cls]
+            if symbol is not None:
+                return True, (target_file, symbol)
+        return True, None
+
+    head, last = parts[0], parts[-1]
+    if head in import_map:
+        target_file, symbol = import_map[head]
+        if symbol is None:
+            return True, (target_file, last)
+    return True, None
 
 
 def _find_functions_named(f: SourceFile, name: str) -> list[ast.AST]:
@@ -1167,12 +1286,24 @@ class ToolScopeCreepDetector(Detector):
              method of the SAME class -- resolves to that exact class's
              own method, never confused with an unrelated same-named
              method on a different class in the same file (P0-2 fix).
+          2b. INSTANCE RECEIVER (2026-08-03) -- ``inst.method(...)`` where
+             ``inst`` is bound to a constructor call in this function's body
+             or at module level. Step 2 reads a bare ``Name`` receiver as a
+             CLASS, so the far more common instance shape never matched and
+             fell through to step 3, where an unrelated same-named helper
+             became a candidate. Resolves the binding to its class and takes
+             that class's own method, in this file or -- via
+             ``_build_import_map`` -- in the file the class was imported
+             from. See ``_instance_receiver_class``.
           3. SAME-FILE BARE NAME -- the pre-existing fallback: every
              function in this file sharing the call's bare short name is a
              candidate. Genuinely ambiguous when more than one exists;
              callers apply an OR-for-sink / AND-for-gate rule across the
              returned candidates (over-flag on disagreement, never a
-             unioned false gate credit)."""
+             unioned false gate credit). NOT reachable once step 2b proves
+             the receiver is an instance: a namesake in this file is then
+             known to be the wrong target, so the call returns ``None``
+             (honest miss) rather than a guess."""
         dotted = _dotted(call.func)
         if not dotted:
             return None
@@ -1211,6 +1342,37 @@ class ToolScopeCreepDetector(Detector):
                 class_name = _enclosing_class_name(f, calling_node)
             if class_name is not None and (class_name, method_name) in class_methods:
                 return [(f, class_methods[(class_name, method_name)])]
+
+            # -- 2b. instance receiver (one hop) ------------------------
+            # Reached only when the class-qualified reading above did NOT
+            # match, so every previously-resolving call keeps its exact
+            # previous target. `db_connection_map.purge_entry(...)` binds
+            # the receiver to its class and resolves that class's own
+            # method -- here, or in the file an explicit same-repo import
+            # brought the class from.
+            if isinstance(receiver, ast.Name) and receiver.id not in ("self", "cls"):
+                is_instance, target = _instance_receiver_class(
+                    f, calling_node, receiver.id, import_map
+                )
+                if is_instance:
+                    if target is not None:
+                        target_file, cls = target
+                        methods = (
+                            class_methods
+                            if target_file.rel == f.rel
+                            else _class_methods_in_file(target_file)
+                        )
+                        found = methods.get((cls, method_name))
+                        if found is not None:
+                            return [(target_file, found)]
+                    # Provably an instance, so provably NOT a class or module
+                    # in THIS file -- which makes step 3's same-file bare-name
+                    # fallback provably wrong for this call, not merely
+                    # imprecise. Stop at an honest miss instead. This is the
+                    # `bea0e90` hazard in this module's terms: a generous name
+                    # edge that fires exactly when exact resolution failed
+                    # grades a call by a namesake rather than by itself.
+                    return None
 
         # -- 3. same-file bare name (fallback) --------------------------
         short = parts[-1]
