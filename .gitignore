@@ -28,3 +28,11 @@ ecoscan-targets.json
 
 # Claude Code local session state -- never publish (public repo)
 .claude/
+
+# Test-run artifacts. CI emits junit.xml (`pytest --junitxml=junit.xml`, see
+# .github/workflows/ci.yml) and check_readme_counts.py reads it back. The file
+# embeds the runner's hostname and absolute local filesystem paths from skip
+# reasons, so a stray `git add -A` after a local CI-equivalent run would publish
+# both to this public repo. Scope: repo root only -- that is the only place the
+# CI command writes it.
+/junit.xml
