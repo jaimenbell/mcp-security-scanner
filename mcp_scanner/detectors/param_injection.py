@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import re
+from dataclasses import dataclass, field
 
 from ..models import Finding, Severity, Confidence
 from ..test_paths import is_test_path
@@ -141,11 +142,15 @@ def _stated_http_verb(sink_name: str) -> str | None:
 #      by matching the short name instead lands straight back on exclusion 1,
 #      so the gap stays open and stated rather than closed by a guess.
 #
-# Also uncovered, and for the same reason -- named so it is a known limit and
-# not a surprise: import aliases (`import httpx as hx; hx.put(url)` renders
-# as `hx.put`; this branch does no alias resolution, unlike
-# `tool_scope_creep._resolved_sink_name`), and keyword-passed URLs
-# (`httpx.get(url=user_url)` puts nothing in `node.args`).
+# Import aliases USED to be listed here as an uncovered limit. They are now
+# resolved -- see `_HTTP_SINK_MODULES`/`_build_http_alias_ctx` below, which
+# ports `tool_scope_creep._resolved_sink_name`'s mechanism to this surface
+# under the same "fixed module allowlist, never a general import graph"
+# restriction. What is matched is unchanged: alias resolution only recovers
+# what a name ALREADY IN this surface was renamed to.
+#
+# Still uncovered, and named so it is a known limit and not a surprise:
+# keyword-passed URLs (`httpx.get(url=user_url)` puts nothing in `node.args`).
 _HTTP_VERB_METHODS = ("get", "options", "head", "post", "put", "patch", "delete")
 
 
@@ -172,6 +177,134 @@ _SSRF_SINK_URL_ARG = _http_sink_url_args()
 _INSTANCE_SINK_URL_ARG: dict[str, int] = (
     {verb: 0 for verb in _HTTP_VERB_METHODS} | {"request": 1, "stream": 1}
 )
+
+# --- import-alias resolution for the HTTP sink surface --------------------
+# WHAT IT MATCHES and WHERE IT APPLIES, stated together, same as every other
+# rule in this file -- a rule shipped without its scope silently means
+# "everywhere", and for a rule whose whole job is to make MORE names match,
+# that is the expensive direction.
+#
+# WHAT: the local name an import bound one of a FIXED set of HTTP modules (or
+# one of their symbols) to, rewritten back to its canonical dotted spelling.
+# `import httpx as hx` makes `hx.get` mean `httpx.get`; `from httpx import
+# post as hx_post` makes the bare `hx_post` mean `httpx.post`. This adds NO
+# sink: the canonical name is then looked up in the SAME, unchanged
+# `_SSRF_SINK_URL_ARG` / `_HTTP_CLIENT_CONSTRUCTORS` surfaces above. If a
+# name was not a sink before it was renamed, resolving the rename does not
+# make it one. No new modules, no new verbs, no new constructors.
+#
+# WHY: without it the surface above matched the literal source text only, so
+# `import httpx as hx; hx.post(user_url)` -- the same sink, one keyword
+# longer -- was structurally invisible, exactly like the half-blind
+# hand-listed verb matcher `_http_sink_url_args` replaced.
+#
+# WHERE IT APPLIES -- five exclusions, each for a stated reason:
+#
+#   1. A FIXED MODULE ALLOWLIST, never a general import graph. Mirrors the
+#      restriction principle of `tool_scope_creep._SINK_MODULES` (which this
+#      ports) -- but NOT its shape: those are bare single-token stdlib names,
+#      while `urllib.request` is a two-level dotted submodule. The membership
+#      test is therefore on the FULL dotted import name, never
+#      `.split(".")[0]`, or `import urllib.request as ur` would either miss
+#      or, worse, admit all of `urllib`.
+#   2. SAME FILE ONLY -- one `ast` walk of one module, the same bound
+#      `_http_client_receivers` and `tool_scope_creep`'s `_SinkFileCtx`
+#      already hold themselves to. A re-export hop (`mywrap.py` does `from
+#      httpx import get`, `tool.py` does `from mywrap import get`) is a
+#      cross-file import chain, not an alias, and is an explicit NON-GOAL:
+#      `mywrap` is not on the allowlist, so it resolves to nothing and flags
+#      nothing.
+#   3. NOT RELATIVE IMPORTS. `from .util import get` can only ever name a
+#      same-repo module -- the re-export case of exclusion 2. `node.level` is
+#      checked explicitly rather than left to fall out of the allowlist,
+#      because `from .httpx import get` in a repo with its own `httpx.py`
+#      would otherwise present `node.module == "httpx"` and be admitted as
+#      the third-party package it is not.
+#   4. PYTHON AST ONLY. The JS/TS path is regex/line-based and has no import
+#      resolution to hook into, the same declination the verb-calibration and
+#      receiver-binding scope blocks already state for themselves.
+#   5. IT RESOLVES, IT NEVER GATES. `has_allowlist`, `_is_constant_str`, the
+#      test-path escalation withholding and the receiver-binding proof all
+#      run afterwards, unchanged and on the same terms -- an alias-resolved
+#      match is subject to every gate the literal spelling is subject to, and
+#      to no different ones. This rule adds no suppression and no escalation
+#      of its own.
+#
+# Known limit, stated rather than discovered later: resolution is file-wide
+# and does not model shadowing, so in a file that says `from httpx import
+# get`, a bare `get(x)` that a local `def get` or parameter shadows would
+# still resolve to `httpx.get`. That is the identical trade
+# `tool_scope_creep._build_sink_file_ctx` makes, and it is gated behind the
+# file actually importing an HTTP verb by name -- a shape that occurs zero
+# times across this repo's 13-repo ecoscan corpus.
+_HTTP_SINK_MODULES = ("httpx", "requests", "aiohttp", "urllib.request")
+
+
+@dataclass(frozen=True)
+class _HttpAliasCtx:
+    """Per-file alias context for the HTTP sink surface.
+
+    ``module_aliases``: local module-alias name -> canonical HTTP module
+    (``"hx"`` -> ``"httpx"`` from ``import httpx as hx``, ``"ur"`` ->
+    ``"urllib.request"`` from ``import urllib.request as ur``).
+
+    ``symbol_aliases``: local bare name -> canonical ``"module.attr"``
+    (``"get"`` -> ``"httpx.get"`` from ``from httpx import get``,
+    ``"hx_post"`` -> ``"httpx.post"`` from ``from httpx import post as
+    hx_post``). Bare non-renamed imports need the map too: the surface above
+    is keyed by dotted name, so an unqualified ``get`` matches nothing
+    without it.
+
+    Both restricted to ``_HTTP_SINK_MODULES``.
+    """
+    module_aliases: dict[str, str] = field(default_factory=dict)
+    symbol_aliases: dict[str, str] = field(default_factory=dict)
+
+
+def _build_http_alias_ctx(tree: ast.AST) -> _HttpAliasCtx:
+    """Collect this file's HTTP-module import aliases. See the scope block
+    above -- allowlisted modules only, absolute imports only, same file."""
+    module_aliases: dict[str, str] = {}
+    symbol_aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # Full dotted name, not its head -- exclusion 1.
+                if alias.name in _HTTP_SINK_MODULES and alias.asname:
+                    module_aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative -- exclusion 3
+                continue
+            if node.module in _HTTP_SINK_MODULES:
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    local = alias.asname or alias.name
+                    symbol_aliases[local] = f"{node.module}.{alias.name}"
+    return _HttpAliasCtx(module_aliases=module_aliases,
+                         symbol_aliases=symbol_aliases)
+
+
+def _canonical_http_name(name: str, ctx: "_HttpAliasCtx | None") -> str:
+    """``name``'s canonical dotted spelling when an allowlisted import
+    renamed it, else ``name`` unchanged.
+
+    An attribute call has its HEAD component rewritten via ``module_aliases``
+    (``"hx.get"`` -> ``"httpx.get"``); a bare call is looked up whole in
+    ``symbol_aliases``. Anything else -- including every receiver-bound
+    instance call, whose receiver is a local variable and not an import --
+    passes through untouched, which is what keeps the receiver-binding branch
+    below seeing the same names it saw before.
+    """
+    if not name or ctx is None:
+        return name
+    if "." not in name:
+        return ctx.symbol_aliases.get(name, name)
+    head, _, rest = name.partition(".")
+    if head in ctx.module_aliases:
+        return f"{ctx.module_aliases[head]}.{rest}"
+    return name
+
 
 # --- receiver binding: which instances ARE HTTP clients -------------------
 # Closes exclusion 3 above, and closes it with evidence rather than a guess.
@@ -235,16 +368,26 @@ _HTTP_CLIENT_CONSTRUCTORS = frozenset({
 
 
 def _note_binding(target: ast.AST, value: ast.AST,
-                  http: set[str], other: set[str]) -> None:
-    """Record one binding as HTTP-client or as anything-else."""
+                  http: set[str], other: set[str],
+                  alias_ctx: "_HttpAliasCtx | None" = None) -> None:
+    """Record one binding as HTTP-client or as anything-else.
+
+    The constructor name is canonicalized through ``alias_ctx`` FIRST, so
+    ``import httpx as hx; c = hx.Client()`` and ``from httpx import
+    AsyncClient; c = AsyncClient()`` bind a client for the same reason the
+    unaliased spelling does. The membership test itself is unchanged: only
+    names already in ``_HTTP_CLIENT_CONSTRUCTORS`` count.
+    """
     name = _dotted(target)
     if not name:
         return
     constructed = _dotted(value.func) if isinstance(value, ast.Call) else ""
+    constructed = _canonical_http_name(constructed, alias_ctx)
     (http if constructed in _HTTP_CLIENT_CONSTRUCTORS else other).add(name)
 
 
-def _http_client_receivers(tree: ast.AST) -> frozenset[str]:
+def _http_client_receivers(tree: ast.AST,
+                           alias_ctx: "_HttpAliasCtx | None" = None) -> frozenset[str]:
     """Receiver names this file proves are HTTP clients.
 
     A name bound to a client constructor AND to anything else in the same
@@ -255,14 +398,14 @@ def _http_client_receivers(tree: ast.AST) -> frozenset[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                _note_binding(target, node.value, http, other)
+                _note_binding(target, node.value, http, other, alias_ctx)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            _note_binding(node.target, node.value, http, other)
+            _note_binding(node.target, node.value, http, other, alias_ctx)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if item.optional_vars is not None:
                     _note_binding(item.optional_vars, item.context_expr,
-                                  http, other)
+                                  http, other, alias_ctx)
         # Every OTHER way a name can come to exist is conflicting evidence
         # (exclusion 3): the resolution is file-wide, so a parameter or loop
         # target sharing a name with a client elsewhere must cancel it out.
@@ -692,12 +835,14 @@ class ParamInjectionDetector(Detector):
             text = f.text
             has_containment = any(h in text for h in _CONTAINMENT_HINTS)
             has_allowlist = any(h in text for h in _ALLOWLIST_HINTS)
-            http_clients = _http_client_receivers(f.tree)
+            alias_ctx = _build_http_alias_ctx(f.tree)
+            http_clients = _http_client_receivers(f.tree, alias_ctx)
             for node in ast.walk(f.tree):
                 if isinstance(node, ast.Call):
                     findings.extend(
                         self._check_call(node, f, has_containment,
-                                         has_allowlist, http_clients)
+                                         has_allowlist, http_clients,
+                                         alias_ctx)
                     )
         return findings
 
@@ -846,6 +991,7 @@ class ParamInjectionDetector(Detector):
     def _check_call(
         self, node: ast.Call, f: SourceFile, has_containment: bool,
         has_allowlist: bool, http_clients: frozenset[str] = frozenset(),
+        alias_ctx: "_HttpAliasCtx | None" = None,
     ) -> list[Finding]:
         out: list[Finding] = []
         name = _dotted(node.func)
@@ -930,13 +1076,21 @@ class ParamInjectionDetector(Detector):
         # matcher that inspects arg[0] reads the literal method string,
         # concludes "constant, not caller-influenced" and reports nothing --
         # while the caller-controlled URL sits untouched right beside it.
-        url_arg = _SSRF_SINK_URL_ARG.get(name)
+        # `ssrf_name` is `name` with an allowlisted import alias resolved back
+        # to its canonical spelling (see _HTTP_SINK_MODULES above). It is
+        # scoped to THIS branch deliberately: `name` still drives every other
+        # sink class in this method, none of which asked for HTTP-module alias
+        # resolution. Both the surface lookup and the verb calibration read it,
+        # so `from httpx import post as hx_post` calibrates to P1 exactly as
+        # `httpx.post` does -- resolving an alias must not change a severity.
+        ssrf_name = _canonical_http_name(name, alias_ctx)
+        url_arg = _SSRF_SINK_URL_ARG.get(ssrf_name)
         if url_arg is None:
             # Instance call on a receiver this file PROVED is an HTTP client.
             # `http_clients` is the whole gate -- see _HTTP_CLIENT_CONSTRUCTORS
             # above. Without a binding hit, `_INSTANCE_SINK_URL_ARG` is never
             # consulted and a bare `.put(` on an unknown receiver stays silent.
-            receiver, _, method = name.rpartition(".")
+            receiver, _, method = ssrf_name.rpartition(".")
             if receiver and receiver in http_clients:
                 url_arg = _INSTANCE_SINK_URL_ARG.get(method)
         if url_arg is not None and len(node.args) > url_arg:
@@ -948,7 +1102,7 @@ class ParamInjectionDetector(Detector):
                     "A tool that fetches a caller-supplied URL can be pointed at "
                     "internal/metadata endpoints or file:// (SSRF)."
                 )
-                verb = _stated_http_verb(name)
+                verb = _stated_http_verb(ssrf_name)
                 if verb in _STATE_CHANGING_VERBS:
                     if is_test_path(f.rel):
                         detail += (
