@@ -21,6 +21,7 @@ import ast
 import re
 
 from ..models import Finding, Severity, Confidence
+from ..test_paths import is_test_path
 from .. import js_util
 from .base import Detector, RepoContext, SourceFile
 
@@ -32,6 +33,68 @@ _ALLOWLIST_HINTS = (
     "allowlist", "allow_list", "whitelist", "ALLOWED", "allowed_hosts",
     "allowed_domains", "urlparse", "hostname", "netloc",
 )
+
+# --- HTTP-verb severity calibration for `ssrf` ---------------------------
+# WHAT IT MATCHES and WHERE IT APPLIES, stated together, because a rule
+# shipped without its scope silently means "everywhere".
+#
+# WHAT: the HTTP verb named by the LAST dotted component of a RESOLVED ssrf
+# sink name -- the `post` in `requests.post`, the `get` in `httpx.get`.
+#
+# WHY it changes severity: `ssrf`'s severity is a claim about what an attacker
+# who redirects the URL can do. Through a read-only verb that is disclosure --
+# read an internal endpoint, read cloud-metadata credentials. Through a
+# state-changing verb it is additionally the power to DRIVE internal state:
+# invoke an unauthenticated internal admin route, enqueue a job, delete a
+# record. Same sink, same missing check, materially larger blast radius, so
+# the mutating form is reported one tier up. That maps onto this repo's own
+# ladder: P2 "defense-in-depth gap / conditional" for the read, P1
+# "exploitable with attacker-reachable but currently-unmet conditions" for the
+# write -- the unmet condition being an internal endpoint that accepts it.
+# Confidence is untouched: the verb changes how bad this is if real, never how
+# sure we are that it is real. Those are separate axes and this rule moves
+# exactly one of them.
+#
+# WHERE IT APPLIES: the Python AST ssrf branch in `_check_call`, and nowhere
+# else. Three exclusions, each for a stated reason:
+#
+#   1. NOT the JS/TS ssrf path (`_scan_js_line`). Two independent reasons,
+#      either sufficient. (a) Its dominant shape is `fetch(url, {method:...})`,
+#      where the verb lives in an options object that reading would need a JS
+#      parser this scanner does not have -- the same declination `auth_posture`
+#      already makes for `listen({host})`. Calibrating `axios.post` while
+#      `fetch` stays blind would make the severity depend on which HTTP client
+#      the target picked, which is not a security property. (b) `ssrf` is in
+#      `grading._CAPPED_CLASSES` and every JS/TS file is unanalysable, so
+#      grading.py would cap any P1 set here straight back to P2. An escalation
+#      on this path could not reach a report at all -- it would be dead code
+#      that merely looked like coverage.
+#   2. NOT sinks that do not STATE a verb. `requests.request(method, url)`,
+#      `urlopen(...)` take the method as a runtime value. Unknown, never
+#      guessed -- they keep the base severity, consistent with this repo's
+#      honest-UNKNOWN-over-a-guess contract.
+#   3. NOT other vuln classes. `tool_scope_creep._MUTATING_SINK_SHORT` also
+#      holds "post"/"delete", but as BARE short names that match any
+#      `.delete()` receiver -- an ORM `session.delete(row)` is not an HTTP
+#      verb. Reusing this rule there would be a substring-scope error.
+#
+# Test paths are handled at the call site: per README's one law a path-shape
+# signal may only demote or tag, so a test path WITHHOLDS the escalation
+# (leaving the base P2) and never suppresses the finding.
+_STATE_CHANGING_VERBS = frozenset({"post", "put", "patch", "delete"})
+_READ_ONLY_VERBS = frozenset({"get", "head", "options"})
+
+
+def _stated_http_verb(sink_name: str) -> str | None:
+    """The HTTP verb a resolved dotted sink name states, or None.
+
+    None means the sink does not name a verb at all (`requests.request`,
+    `urlopen`) -- the caller must treat that as UNKNOWN, never as read-only.
+    """
+    verb = sink_name.rpartition(".")[2].lower()
+    if verb in _STATE_CHANGING_VERBS or verb in _READ_ONLY_VERBS:
+        return verb
+    return None
 
 # --- JS/TS parity sinks --------------------------------------------------
 # Regex/line-based (see js_util's honesty note) -- there is no JS/TS AST in
@@ -678,12 +741,38 @@ class ParamInjectionDetector(Detector):
             "urllib.request.urlopen", "urlopen",
         ):
             if node.args and not _is_constant_str(node.args[0]) and not has_allowlist:
+                # HTTP-verb calibration. See _STATE_CHANGING_VERBS above for
+                # the rule and its scope; severity moves, confidence does not.
+                sev = Severity.P2
+                detail = (
+                    "A tool that fetches a caller-supplied URL can be pointed at "
+                    "internal/metadata endpoints or file:// (SSRF)."
+                )
+                verb = _stated_http_verb(name)
+                if verb in _STATE_CHANGING_VERBS:
+                    if is_test_path(f.rel):
+                        detail += (
+                            f" This sink uses the state-changing verb "
+                            f"{verb.upper()}, which would normally raise it to "
+                            "P1, but the file is on a test-path so the "
+                            "escalation is withheld (test-path); the finding "
+                            "itself still stands."
+                        )
+                    else:
+                        sev = Severity.P1
+                        detail += (
+                            f" Escalated: this sink uses the state-changing "
+                            f"verb {verb.upper()}, so a redirected URL is not "
+                            "only an internal-endpoint READ -- it can drive "
+                            "internal state (invoke an unauthenticated admin "
+                            "route, enqueue work, delete a record). Confidence "
+                            "is unchanged; only the impact is."
+                        )
                 out.append(self._f(
                     "ssrf",
                     "HTTP fetch of a caller-influenced URL with no host allowlist",
-                    Severity.P2, Confidence.MEDIUM, f, node.lineno,
-                    "A tool that fetches a caller-supplied URL can be pointed at "
-                    "internal/metadata endpoints or file:// (SSRF).",
+                    sev, Confidence.MEDIUM, f, node.lineno,
+                    detail,
                     "Validate the URL against a host allowlist; reject non-http(s) "
                     "schemes and private/link-local IP ranges before fetching.",
                 ))
