@@ -215,6 +215,58 @@ a dedicated two-hop-miss fixture, ``clean_tool_scope_two_hop_probe_miss``,
 modeled directly on vllm-ops-mcp's real shape so the zero-findings outcome
 above has an actual regression guard, not just prose).
 
+Round 4 -- receiver binding (2026-08-03, two slices). Round 3 above left the
+attribute branch matching a mutating short name on ANY receiver, and said so
+in its own comment ("regardless of what the receiver is"). That was correct
+as a fix for refuter B's ``Path(x).unlink()`` miss and wrong as a general
+rule: ``registry.remove(key)``, ``store.put(k, v)``, ``mocker.patch(...)``,
+``asyncio.run(...)``, ``logger.remove()`` and ``mcp.run()`` are not sinks,
+and the attribute branch read every one of them as one. Measured over the
+13-repo ecosystem-scan corpus (3,831 parsed Python files) that branch fires
+2,199 times; the shape that reaches a published finding is
+``db_connection_map.remove(...)``, an in-memory connection registry, which
+flagged ``connect_to_database`` P1/HIGH in three AWS Labs database MCP
+servers.
+
+Slice 1 (commit ``5c5205a``) bound the receiver for the one-hop RESOLVER:
+``inst.method(...)`` now resolves to that exact class's own method. Slice 2
+(this change) binds it for sink CLASSIFICATION, and the two are deliberately
+coupled -- a call is demoted at its call site under exactly the condition
+that makes slice 1 follow it into the method's real body, so no reach is
+given up (``_ctor_target_class`` is shared by both for that reason). This is
+the existing bare-``Name`` law -- "resolvable to a repo-internal function ->
+not a sink BY ITSELF, the one-hop resolver inspects its real body elsewhere"
+-- extended from ``foo()`` to ``x.foo()``, not a new one.
+
+THE UNKNOWN-RECEIVER DEFAULT IS "FLAG". Only a proven repo-internal
+instance method is demoted; an unresolvable receiver, a computed receiver
+(``Path(x).unlink()``, ``self.jira.post()``), a third-party handle
+(``httpx.Client().post()``) and a locally-bound receiver all keep their flag.
+That is this file's standing law (full suppression is reserved for our own
+exact-match judgment) and it is also where real sinks live. Note the
+deliberate ASYMMETRY with slice 1: for the resolver, an unresolvable instance
+receiver stops at an honest miss, because following a same-file namesake
+would be provably wrong; for classification, the same receiver keeps its
+flag, because over-flagging is the safe direction. Same fact, opposite
+consequence, because the two answer different questions.
+
+Measured, not assumed: across the pre-existing fixture corpus, all detectors,
+the finding set is byte-identical -- 181 findings before and after, same
+files, same lines, same severities. The only movement in the whole corpus is
+this slice's own two new clean fixtures, which flag before the change and are
+quiet after (4 -> 2 across the four new dirs; the two vuln ones stay flagged).
+Live: scanning the three affected AWS Labs servers as their own
+repos -- the realistic unit, and the one ``--self-audit`` uses -- clears all
+three ``connect_to_database`` P1/HIGH false positives and changes nothing
+else. Scanning the same code as ONE 3,703-file monorepo clears none of them,
+and that is the demotion failing CLOSED against a pre-existing
+``_build_import_map`` limitation, not a defect this slice added: an absolute
+import (``from awslabs.mssql_mcp_server...``) does not resolve to a
+repo-relative path when the package root is nested under ``src/<server>/``,
+so no class is openable, so nothing is proven, so the flag stands. Verified
+directly by building both contexts side by side rather than inferred from
+the counts.
+
 Disclosed, out-of-scope follow-ups: (1) extending the one-hop resolver to a
 bounded second hop (would restore a P2-level finding for vllm-ops-mcp's real
 shape) -- a separate, larger initiative, not attempted here; (2) the JS/TS
@@ -364,11 +416,17 @@ def _unparse(node: ast.AST) -> str:
 #   * A real ``ast.Attribute`` access (``isinstance(call.func,
 #     ast.Attribute)``) -- checked STRUCTURALLY, never by whether the
 #     rendered name happens to contain a "." -- matches the short-name
-#     fallback (``_MUTATING_SINK_SHORT``) regardless of what the receiver
-#     is, closing P1. A resolvable module alias (``import subprocess as
-#     sp; sp.run(...)``) is canonicalized to its real ``module.attr``
-#     spelling first (``_resolved_sink_name``) so exact-set matching and the
-#     shell=True severity axis both see through the alias.
+#     fallback (``_MUTATING_SINK_SHORT``), closing P1. A resolvable module
+#     alias (``import subprocess as sp; sp.run(...)``) is canonicalized to
+#     its real ``module.attr`` spelling first (``_resolved_sink_name``) so
+#     exact-set matching and the shell=True severity axis both see through
+#     the alias. **AMENDED 2026-08-03 (slice 2):** this bullet used to end
+#     "regardless of what the receiver is", and that clause was itself a
+#     false-positive generator -- see ``_build_internal_receiver_methods``.
+#     Being receiver-AGNOSTIC was never what closed refuter B; what closed
+#     it was dropping the rendered-string "." test. The receiver is now
+#     CLASSIFIED: a call proven to be a method on a repo-internal instance
+#     is not a sink at its call site, everything else is unchanged.
 #   * A bare ``Name`` call is RESOLVED, never blanket-included or
 #     blanket-excluded (closing P0):
 #       1. bound by a direct stdlib-sink import (``from os import remove``,
@@ -411,10 +469,19 @@ class _SinkFileCtx:
     same-file function definition, or an explicit same-repo import per
     ``_build_import_map``) -- used only to decide that an unresolved-looking
     bare call is "someone's own function, not a raw external/stdlib call",
-    never to prove it safe (the one-hop resolver still inspects its body)."""
+    never to prove it safe (the one-hop resolver still inspects its body).
+
+    ``internal_receiver_methods`` (slice 2, 2026-08-03): ``(receiver_name,
+    method_name)`` pairs PROVEN to be a method call on a repo-internal
+    instance -- the attribute-call counterpart of ``local_names``, and
+    governed by the identical law. See
+    ``_build_internal_receiver_methods`` for what counts as proof and
+    ``_is_mutating_sink_call`` for why an unproven receiver keeps its
+    flag."""
     module_aliases: dict[str, str] = field(default_factory=dict)
     symbol_aliases: dict[str, str] = field(default_factory=dict)
     local_names: frozenset[str] = field(default_factory=frozenset)
+    internal_receiver_methods: frozenset[tuple[str, str]] = field(default_factory=frozenset)
 
 
 _SINK_MODULES = ("os", "subprocess", "shutil")
@@ -456,6 +523,7 @@ def _build_sink_file_ctx(
         module_aliases=module_aliases,
         symbol_aliases=symbol_aliases,
         local_names=frozenset(local_names),
+        internal_receiver_methods=_build_internal_receiver_methods(f, files_by_rel),
     )
 
 
@@ -490,16 +558,39 @@ def _resolved_sink_name(call: ast.Call, ctx: "_SinkFileCtx | None") -> tuple[str
     return name, is_attr
 
 
+def _receiver_is_internal_instance(call: ast.Call, ctx: "_SinkFileCtx | None") -> bool:
+    """True when ``call`` is ``receiver.method(...)`` and ``ctx`` PROVES
+    ``receiver`` is a repo-internal instance whose class defines ``method``
+    (see ``_build_internal_receiver_methods`` for what counts as proof).
+
+    Only a bare ``Name`` receiver is considered. A computed receiver
+    (``Path(x).unlink()``, ``requests.Session().post()``, ``self.jira.post()``)
+    is never proven here -- deliberately, since that is exactly the shape
+    round 2's refuter B established this detector must keep catching."""
+    if ctx is None or not ctx.internal_receiver_methods:
+        return False
+    func = call.func
+    if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+        return False
+    return (func.value.id, func.attr) in ctx.internal_receiver_methods
+
+
 def _is_mutating_sink_call(call: ast.Call, ctx: "_SinkFileCtx | None" = None) -> bool:
     """True when ``call`` is a dangerous sink, matched STRUCTURALLY -- never
     by substring, and never by whether a rendered string happens to contain
     a "." (see the round-2 N-vote fix comment above ``_SinkFileCtx`` for the
     full history of why that proxy was wrong on both sides). ``ctx`` (when
-    provided) resolves module aliases, direct stdlib-sink imports, and
-    repo-internal bare names; omitting it (``ctx=None``) degrades gracefully
+    provided) resolves module aliases, direct stdlib-sink imports,
+    repo-internal bare names, and (slice 2, 2026-08-03) repo-internal
+    attribute RECEIVERS; omitting it (``ctx=None``) degrades gracefully
     to "no resolution available" -- exact dotted/attribute-short-name
-    matching still applies, only the bare-name resolution steps are skipped
-    (every existing call site in this file now passes a real ``ctx``)."""
+    matching still applies, only the resolution steps are skipped
+    (every existing call site in this file now passes a real ``ctx``).
+
+    Order matters and is deliberate: the exact dotted set is consulted
+    BEFORE receiver classification, so a real ``os.remove``/``subprocess.run``
+    can never be demoted by a receiver proof, no matter what a file has
+    bound that head name to."""
     name = _dotted(call.func)
     if not name:
         return False
@@ -511,11 +602,23 @@ def _is_mutating_sink_call(call: ast.Call, ctx: "_SinkFileCtx | None" = None) ->
         return True
 
     if is_attr:
-        # Structural: ANY real attribute access matches the short-name
+        # Slice 2 (2026-08-03): classify the RECEIVER before the short name.
+        # A method call proven to be on a repo-internal instance is not a
+        # sink BY ITSELF -- identical wording, identical law, to the bare-
+        # `Name` `local_names` rule in the else-branch below, and the one-hop
+        # resolver inspects that method's real body either way.
+        if _receiver_is_internal_instance(call, ctx):
+            return False
+        # Structural: any OTHER real attribute access matches the short-name
         # fallback regardless of what the receiver is (fixes refuter B's
         # Path(x).unlink() / requests.Session().post() / get_proc().run()
         # -- _dotted collapses all three to a bare leaf with no "."; gating
         # on the rendered string's punctuation was the bug, not this test).
+        # THE UNKNOWN-RECEIVER DEFAULT IS "FLAG", stated once: an
+        # unresolvable receiver is exactly where a real third-party
+        # network/filesystem/db handle lives, and this detector's standing
+        # law is that only our own exact-match proof may make a finding
+        # disappear.
         if short in _MUTATING_SINK_SHORT:
             return True
     else:
@@ -918,24 +1021,172 @@ def _instance_receiver_class(
     ctor = ctor_names.pop()
     if not ctor:
         return True, None
+    return True, _ctor_target_class(f, ctor, import_map)
+
+
+def _ctor_target_class(
+    f: SourceFile,
+    ctor: str,
+    import_map: dict[str, tuple[SourceFile, str | None]],
+) -> tuple[SourceFile, str] | None:
+    """The ``(file, ClassName)`` a constructor call's dotted callee names, or
+    ``None`` when this pass cannot point at exactly one class -- a
+    third-party class, a factory function, or an unresolvable head.
+
+    Extracted from ``_instance_receiver_class`` (slice 1) so slice 2's
+    ``_build_internal_receiver_methods`` resolves a constructor by the SAME
+    rules the one-hop resolver does. That agreement is not tidiness, it is
+    the entire safety argument for the demotion: slice 2 only stops treating
+    ``inst.method(...)`` as a sink at the CALL SITE under exactly the
+    condition that makes slice 1's step 2b follow it into that method's real
+    body. If these two ever resolved differently, the demotion would start
+    buying silence instead of precision."""
     parts = ctor.split(".")
 
     if len(parts) == 1:
         cls = parts[0]
         if cls in _class_names_in_file(f):
-            return True, (f, cls)
+            return (f, cls)
         if cls in import_map:
             target_file, symbol = import_map[cls]
             if symbol is not None:
-                return True, (target_file, symbol)
-        return True, None
+                return (target_file, symbol)
+        return None
 
     head, last = parts[0], parts[-1]
     if head in import_map:
         target_file, symbol = import_map[head]
         if symbol is None:
-            return True, (target_file, last)
-    return True, None
+            return (target_file, last)
+    return None
+
+
+def _all_bound_names(f: SourceFile) -> dict[str, int]:
+    """How many times each name is BOUND anywhere in file ``f``, counting
+    every binding form Python has: assignment/augmented-assignment/annotated
+    targets, loop and ``with``/``except`` targets, comprehension variables,
+    walrus, function parameters, ``def``/``class`` names, and import aliases.
+
+    Used only as a shadowing counter (see
+    ``_build_internal_receiver_methods``): a module-level binding proves
+    nothing about a name that is ALSO bound somewhere else in the file,
+    because the object at a given call site may then be a different one
+    entirely. Counting rather than set-membership is what makes that check
+    work -- the module-level binding is itself one of these counts, so
+    "bound elsewhere too" is exactly "count exceeds the module-level
+    count".
+
+    A bare ``global x`` / ``nonlocal x`` DECLARATION is deliberately not
+    counted, and the reason is measurable rather than stylistic: a
+    declaration cannot rebind anything by itself, and the assignment that
+    would is a ``Name``/``Store`` already counted here. Counting the
+    declaration too cost 2 of this slice's 3 real false-positive
+    suppressions -- `mssql-mcp-server` and `postgres-mcp-server` both
+    declare ``global db_connection_map`` in functions that never assign it
+    (verified: all three servers bind the name exactly once, at module
+    level), while `oracle-mcp-server`, byte-for-byte the same shape
+    otherwise, does not declare it at all. A rule that split three
+    identical cases on a no-op statement was measuring the wrong thing."""
+    counts: dict[str, int] = {}
+    if f.tree is None:
+        return counts
+
+    def bump(name: str | None) -> None:
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+
+    for node in ast.walk(f.tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bump(node.id)
+        elif isinstance(node, ast.arg):
+            bump(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bump(node.name)
+        elif isinstance(node, ast.alias):
+            bump(node.asname or node.name.split(".")[0])
+        elif isinstance(node, ast.ExceptHandler):
+            bump(node.name)
+    return counts
+
+
+def _build_internal_receiver_methods(
+    f: SourceFile,
+    files_by_rel: dict[str, SourceFile] | None,
+) -> frozenset[tuple[str, str]]:
+    """``(receiver_name, method_name)`` pairs PROVEN, in file ``f``, to be a
+    method call on an instance of a class this scan can open.
+
+    The proof has three parts and every one of them is required:
+
+      1. ``receiver`` is bound AT MODULE LEVEL (read from ``f.tree.body``
+         directly, never walked -- a walk would collect unrelated locals from
+         every function body in the file, which is the namesake confusion
+         slice 1 exists to remove) to exactly one value, and that value is a
+         CALL.
+      2. That call's callee resolves to exactly one class, here or in the
+         file an explicit same-repo import brought it from
+         (``_ctor_target_class`` -- the same resolution the one-hop resolver
+         uses).
+      3. That class DEFINES the method. An inherited, mixed-in or
+         dynamically-attached attribute proves nothing about what the call
+         does, so it is left alone.
+
+    ``receiver`` is additionally dropped if it is bound anywhere ELSE in the
+    file (``_all_bound_names``): a local rebinding, a parameter of the same
+    name, or a ``global x; x = ...`` reassignment all mean the module-level
+    binding may not be the object at the call site.
+
+    Scope, stated with the pattern -- module level ONLY. A receiver bound
+    inside the tool's own body (``reg = Registry()`` then ``reg.remove(k)``
+    two lines later) is NOT proven here and keeps its flag. That is a
+    deliberate, disclosed miss in the over-flag direction: this context is
+    built once per FILE and has no call site to scope a local lookup to.
+    Widening it to local scopes means threading the enclosing node through
+    sink classification, which is a structural change, not this slice."""
+    if f.tree is None:
+        return frozenset()
+
+    import_map: dict[str, tuple[SourceFile, str | None]] = (
+        _build_import_map(f, files_by_rel) if files_by_rel is not None else {}
+    )
+
+    module_values: dict[str, list[ast.AST]] = {}
+    for stmt in f.tree.body:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    module_values.setdefault(target.id, []).append(stmt.value)
+        elif isinstance(stmt, ast.AnnAssign):
+            if isinstance(stmt.target, ast.Name) and stmt.value is not None:
+                module_values.setdefault(stmt.target.id, []).append(stmt.value)
+
+    if not module_values:
+        return frozenset()
+
+    bind_counts = _all_bound_names(f)
+    methods_cache: dict[str, dict[tuple[str, str], ast.AST]] = {}
+    out: set[tuple[str, str]] = set()
+
+    for name, values in module_values.items():
+        if bind_counts.get(name, 0) != len(values):
+            continue                                  # bound elsewhere too
+        if len(values) != 1 or not isinstance(values[0], ast.Call):
+            continue                                  # not a lone constructor call
+        ctor = _dotted(values[0].func)
+        if not ctor:
+            continue
+        target = _ctor_target_class(f, ctor, import_map)
+        if target is None:
+            continue                                  # class not openable here
+        target_file, cls = target
+        cached = methods_cache.get(target_file.rel)
+        if cached is None:
+            cached = _class_methods_in_file(target_file)
+            methods_cache[target_file.rel] = cached
+        for (owner, method) in cached:
+            if owner == cls:
+                out.add((name, method))
+    return frozenset(out)
 
 
 def _find_functions_named(f: SourceFile, name: str) -> list[ast.AST]:
