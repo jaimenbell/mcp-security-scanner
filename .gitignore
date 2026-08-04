@@ -25,3 +25,6 @@ staged/
 ecoscan-artifacts/
 ecoscan-scratch/
 ecoscan-targets.json
+
+# Claude Code local session state -- never publish (public repo)
+.claude/
