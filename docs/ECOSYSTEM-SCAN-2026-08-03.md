@@ -322,10 +322,14 @@ is worth +33 findings on today's SHAs — but it is a bound, not a reconstructio
 records target SHAs precisely so the next before/after does not have this hole.
 
 **Nothing here is a vulnerability claim about a named repository.** The 66 gate-qualifying
-findings at HEAD have not been hand-audited. Raw per-repo totals are published because the delta
-story requires them; severity and class are not attributed to a named repo, because an unreviewed
-finding attributed to a project reads as an accusation and is not one. The single exception is
-the `awslabs/mcp` codegen finding, and only because a third party made it public first.
+findings at HEAD **were** hand-audited on 2026-08-03 — see the addendum at the end of this
+report, and the per-finding record in
+[`ECOSYSTEM-SCAN-2026-08-03-AUDIT-66.md`](./ECOSYSTEM-SCAN-2026-08-03-AUDIT-66.md). Raw per-repo
+totals are published because the delta story requires them; severity and class are still not
+attributed to a named repo, because a finding attributed to a project reads as an accusation
+whether or not we have reviewed it, and no maintainer in this corpus has heard from us. The
+single exception is the `awslabs/mcp` codegen finding, and only because a third party made it
+public first.
 
 **Standing scanner limits**, unchanged and worth repeating:
 
@@ -365,3 +369,169 @@ are partial, and one is still open and named as such.
 A scanner honest about its false positives is more trustworthy than one reporting a scarier
 number nobody checked. The way to demonstrate that is not to assert it — it is to publish the
 false positives, then publish the commits that closed them, then re-run and show the delta.
+
+---
+
+## Addendum, 2026-08-03: we read the 66
+
+This report ends on a claim it had not yet earned:
+
+> A tool that can tell you which 66 of 1,448 to read first is.
+
+That is only true if someone reads them. We did — all 66, by hand, against the actual source in
+each cloned target at the SHAs above, rather than against the scanner's own snippet field. The
+per-finding record, verdict by verdict, is in
+[`ECOSYSTEM-SCAN-2026-08-03-AUDIT-66.md`](./ECOSYSTEM-SCAN-2026-08-03-AUDIT-66.md).
+
+### The queue was mostly noise, and one finding in the queue was ours
+
+| verdict recorded | findings | share |
+|---|---|---|
+| Real defect, judged worth a maintainer's attention | 2 | 3% |
+| Real pattern, judged not a meaningful vulnerability | 28 | 42% |
+| False positive — the scanner was wrong about the code | 36 | 55% |
+
+How that table came to exist matters more than the numbers in it. An earlier draft of this
+addendum carried a **different** split. That split was never written down — no file, no commit,
+no annotation, nothing on disk — and when the time came to publish it we could not produce the
+record behind it. Printing an unretained table with percentages, inside a report whose entire
+argument is that a scanner should not emit numbers nobody checked, would have been the exact
+failure this document is about.
+
+So the audit was run again, and this time it was retained. The table above is the second pass,
+each of the 66 verdicts recorded with the reasoning that produced it. The first pass's numbers
+are not reported here, because we cannot show you where they came from.
+
+Two things about that first row.
+
+**Both real-defect findings are the same detector class — `codegen-injection` — and they are two
+distinct defects in two different files.** One of them is the finding described in "The one
+finding that was real" above: the one an outside contributor independently found and fixed in a
+public pull request, more completely than our draft had.
+
+**Which is the correction that matters.** An earlier version of this addendum said we had found
+genuinely novel, unreported defects. We had not run the prior-art search before writing that
+down, and at least one of the two was already public. That claim was false, and it was false
+because nobody looked before asserting it. The prior-art step is now the part of this exercise we
+would tell someone else to do first: reporting a known issue is the fastest way to lose standing
+with a maintainer, and the search that prevents it costs minutes.
+
+What survives is **one** finding, in the `codegen-injection` class, in a third-party repository,
+still unreported to its maintainer. We are not describing it further here. A description precise
+enough to be useful to a reader is precise enough to be useful to someone else, and this one has
+not been disclosed. It is named after disclosure, not before.
+
+So the honest yield of the exercise is: **read 66 findings, out of 1,448 raw, to arrive at one
+defect a maintainer plausibly does not already know about.** That is still, we think, a defensible
+use of a reviewer's afternoon — a queue you can actually finish is the product. But "one" is the
+number.
+
+### The most useful thing we found was a bug in this scanner
+
+**Two of the three P0 findings in the entire gate-qualifying queue were the same false positive,
+produced by one defect in our own reachability grader.** Both were in `PrefectHQ/fastmcp`, and
+naming it here is exculpatory: it clears them.
+
+Both were unshipped test doubles — a class whose own docstring reads *"UNSAFE: Uses `exec()` for
+testing only. Never use in production."* The package ships no tests at all; its build manifest
+excludes them entirely. There was never an attack path, and we graded them P0.
+
+The mechanism, precisely:
+
+1. `CallGraph.reachable_from` follows a callee by **short name, repo-wide**. That is deliberate
+   and documented — "deliberately generous" — and it is the right default for a tool whose job is
+   to over-flag rather than silently drop.
+2. But that edge is **one-to-many**. A single production call to `sandbox_provider.run(` rooted in
+   a registered MCP tool promoted *every* function named `run` anywhere in the repository into the
+   reachable set — both test doubles included.
+3. `_grade_one` consults the call-graph grader first and treats a decided answer as final. So the
+   `is_test_path() → CLI_ONLY` fallback we added on 2026-07-29 (`b9e341a`) — written for exactly
+   this class, after "test harness treated as production attack surface" came back as the largest
+   false-positive class in that day's held-out measurement — **was structurally unable to fire. It
+   never got asked.**
+
+The consequence compounds in both directions at once: `REACHABLE` also triggers a confidence
+*promotion*, while `CLI_ONLY` carries the `--fail-on` *exclusion*. One name guess therefore
+inflated severity and defeated the suppression in a single step. That is how a test double reached
+a P0 slot in a report we published.
+
+**The fix** (`bea0e90`) tracks edge provenance. The walk stays exactly as generous — nothing is
+dropped, every edge is still followed and still reported — but it now also records which nodes
+were reached by a path whose every edge resolved *exactly* (caller and callee in the same file).
+The grader declines `REACHABLE` only where **both** hold: the sink was reached *solely* through
+best-effort name guesses, **and** the file is a test path. Either condition alone changes nothing.
+A weak-only path through production code stays `REACHABLE`, so recall on the surface that matters
+is unchanged.
+
+Stating the scope alongside the pattern is the whole lesson. The 2026-07-29 fallback was correct,
+and was defeated by a rule elsewhere whose scope nobody had written down.
+
+**Effect on the numbers in this report.** Exactly four of the 66 sit on a path the scanner's own
+`is_test_path()` recognises, and all four are in `PrefectHQ/fastmcp`. Re-scanning that target's
+clone at the same SHA with the fixed scanner takes it from **13 gate findings to 11** and from
+**2 P0s to 0** — observed, not projected; the two findings that drop are precisely the two test
+doubles, and the other two test-path findings keep their `REACHABLE` grade because they are
+reached by a real same-file edge. No finding in any other target can be affected, because the fix
+can only change the grade of a finding on a test path and there are none elsewhere in the queue.
+So the corpus figure moves from **66 to 64**, leaving one P0 — which is a **different finding in a
+different repository**, unrelated to the surviving defect discussed above, and which this audit
+recorded as a real pattern that is not a meaningful vulnerability (an opt-in, off-by-default
+code-execution feature doing exactly what it advertises).
+
+The table above is not being edited — it honestly records what the scanner produced on 2026-08-03
+— but any reader reproducing it with a current build will get 64, and should.
+
+### What the false positives look like — one reader's triage, not a result
+
+The 36-false-positive verdict is a **single hand-audit pass, and it has not been independently
+checked.** It is published because it is the scanner's own backlog and it is the useful part of
+the exercise — not because it is settled, and it should not be cited as a measured false-positive
+rate.
+
+Two of the patterns are mechanically checkable by re-running the scan at the target SHAs published
+above, and those we do state as fact:
+
+- **Reachability asserted rather than computed.** All **17** `tool-scope-creep` findings in the
+  queue are graded `reachable` with an **empty** `reachability_evidence` field — 17 of 17.
+  Reachability is the property the gate keys on; a bare assertion is not evidence. The audit
+  judged 12 of those 17 outright false positives.
+- **Severity decoupled from confidence.** All **26** `hardcoded-secret` findings in the queue were
+  emitted at **P1**, including **11** that carry the scanner's own `confidence: low`. The audit
+  judged 19 of the 26 false positives and **none** a real defect — the worst-performing detector
+  in the queue, and the one emitting the most findings.
+
+The rest are the auditor's reading of *why* a given finding was wrong, offered as hypotheses for
+the backlog:
+
+- **Matching the identifier instead of the value.** Flagged as "hardcoded secret": URLs,
+  environment-variable names, JS global property names, RFC 8693 URNs, enum members naming an auth
+  method, and keychain field-name keys.
+- **Blind to the guard immediately in front of the sink.** A destructive cache operation whose
+  permission check is *statement one of the same function*. Database connectors whose own file
+  defines the default-off write flag the finding says is absent — literally the remediation our
+  own finding text recommends. A shell `rm -rf` sitting inside the then-branch of the
+  environment-variable guard that exists to prevent it.
+- **Polarity inversion.** `trap 'rm -rf "$TEMP"' EXIT` and the wiping of an ephemeral signing-key
+  home after a CI release step are *mitigations*. We flagged both as destructive operations.
+- **Counter-evidence treated as a demotion rather than a refutation.** The scanner computes a
+  "non-credential-shape" signal on the assigned value, and then demotes confidence instead of
+  dropping the finding.
+
+We are not shipping a blanket "ignore anything under a test or CI path" rule in response. That
+would suppress most of one detector's true positives and would blind the scanner to CI workflows
+triggered by `pull_request_target`, where a destructive step *does* operate on
+attacker-influenced input. The correct shape is a context signal that demotes, paired with a
+promoter that restores severity on the trigger types that actually carry risk.
+
+### What we are not saying
+
+The one surviving defect is in a third-party repository and has **not** been reported to its
+maintainer. No upstream contact of any kind has been made, on this or on anything else in the
+queue. Until a coordinated-disclosure decision is taken it stays unnamed and undescribed here —
+an audited finding is still an unreported one, and publishing a precise description of an
+unpatched defect before its maintainer has heard from us would be the opposite of the discipline
+this report is arguing for.
+
+And the honest summary of this addendum is not "we audited 66 findings and found a vulnerability."
+It is that we published a verdict split we could not evidence, had to redo it, and that the audit
+which resulted rates our own highest-volume detector at zero real defects in twenty-six tries.
