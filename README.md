@@ -146,3 +146,6 @@ Each detector ships a matched pair of fixtures — a vulnerable one it must catc
 Maintained by [Jaimen Bell](https://jaimenbell.dev). For MCP server security
 reviews, managed scanning, or custom detector work, see
 [jaimenbell.dev](https://jaimenbell.dev).
+
+Building your own MCP server? The [MCP Starter Kit](https://jaimenbell.gumroad.com/l/adnojp)
+has templates, a build playbook, and packaging war-stories from shipping this one.
