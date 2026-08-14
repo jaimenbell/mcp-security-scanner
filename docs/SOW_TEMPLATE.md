@@ -157,8 +157,8 @@ delivered report, D1 §5-7; in this SOW they refer to that same report.)*
 - **Structure:** 50% deposit due at kickoff (Day 0), balance due on delivery
   of D1 (the client-facing report) -- the default shape unless the signed
   engagement states otherwise.
-- **Rail:** Gumroad -- `https://jaimenbell.gumroad.com/l/mcp-security-audit` (listing not yet live as of this
-  template's version date; paste the product link once cut).
+- **Rail:** Gumroad -- `https://jaimenbell.gumroad.com/l/mcp-security-audit` 
+  (listing live as of 2026-08-13).
 - **Refunds:** `[state refund policy here, e.g. deposit is non-refundable
   once the scan starts; full refund if kickoff never occurs]`.
 - **Late/non-payment:** `[state consequence, e.g. D1 is withheld until the
