@@ -150,7 +150,23 @@ delivered report, D1 §5-7; in this SOW they refer to that same report.)*
 
 ---
 
-## 8. Signatures
+## 8. Payment terms
+
+- **Amount:** `[fee agreed in §7 Pricing path -- $250-750 fixed, band per repo
+  size/complexity]`.
+- **Structure:** 50% deposit due at kickoff (Day 0), balance due on delivery
+  of D1 (the client-facing report) -- the default shape unless the signed
+  engagement states otherwise.
+- **Rail:** Gumroad -- `<GUMROAD-SCAN-LINK>` (listing not yet live as of this
+  template's version date; paste the product link once cut).
+- **Refunds:** `[state refund policy here, e.g. deposit is non-refundable
+  once the scan starts; full refund if kickoff never occurs]`.
+- **Late/non-payment:** `[state consequence, e.g. D1 is withheld until the
+  balance clears]`.
+
+---
+
+## 9. Signatures
 
 `[Client]` -- `[name / title / date]`
 
