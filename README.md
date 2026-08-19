@@ -67,21 +67,65 @@ mcp-scan <path-to-mcp-server>
 
 The scanner reads only git-tracked source (falling back to a filtered tree walk in non-git dirs), so vendored deps, caches, and vector stores are skipped.
 
-## The dogfood proof (`--self-audit`)
+## The self-audit (`--self-audit`) — a regression gate, not a trust claim
 
-The scanner is validated against **eight real, in-production MCP servers** — the strongest trust signal we can offer in a market that has been burned by simulated proof-of-work. This is the acceptance test (`tests/test_self_audit.py`), reproducible yourself via `--self-audit` (see setup above): **P0=0 fleet-wide, 6 of 8 servers clean, 2 with findings** — `github-mcp` (2x P1/LOW, its own fake test tokens, honestly reported) and `discord-mcp` (1x P1/LOW, TEST_TOKEN fixture, honestly reported). No other server carries a P0 or P1; this 8/6/2 headline is the trust claim and is what the acceptance test pins.
+> [!WARNING]
+> **This section used to be called "the dogfood proof" and described the 8/6/2 headline as "the
+> strongest trust signal we can offer." That framing was withdrawn 2026-08-19.** Running a scanner
+> against your own code cannot establish that it works. The measurement that can is in
+> [Held-out measurement](#held-out-measurement--the-honest-record) below, and it did not go well.
+> A server that returns nothing here has produced **silence, not a clean bill.**
 
-Illustrative sample run (2026-07-31 — a dated snapshot, not a live feed; per-server P2/ungraded counts drift run-to-run as detectors evolve and are deliberately **not** part of the trust claim above, only the P0/P1 headline is):
+`--self-audit` runs the scanner across eight of my own MCP servers as an acceptance test
+(`tests/test_self_audit.py`), reproducible yourself via `--self-audit` (see setup above). Current
+result: **P0=0 fleet-wide, 6 of 8 returned no P0/P1, 2 flagged** — `github-mcp` (2x P1/LOW, its own
+fake test tokens, honestly reported) and `discord-mcp` (1x P1/LOW, TEST_TOKEN fixture, honestly
+reported).
+
+What that pins is a **regression gate**: the detectors still run, the report still renders, and no
+new high-confidence P0/P1 appears on a fleet I control. It is evidence about the *plumbing*. It is
+not evidence that those eight servers are secure, and it is not evidence the scanner finds real
+issues — the held-out measurement is the only thing that speaks to that.
+
+<a name="held-out-measurement--the-honest-record"></a>
+### Held-out measurement — the honest record
+
+Measured blind on **2026-07-29** against five pinned third-party MCP servers (notion, neon, qdrant,
+firecrawl, airtable), with ground truth frozen to disk by five independent audits **before** the
+first scan:
+
+| axis | result |
+|---|---|
+| precision | **0 true positives / 58 findings** |
+| recall (pooled) | **0 / 69** |
+| recall (restricted to the 3 classes it implements) | **0 / 7** |
+
+The best case was `mcp-server-qdrant` — every `.py` file loaded with full ASTs, every detector
+eligible — and it found **0 of 9**, including a path traversal a blind auditor reproduced live. On
+firecrawl it reported **twelve** hardcoded-secret findings, all synthetic test fixtures, while
+missing a real live-shaped Airtable PAT.
+
+**What I did about it:** pulled the paid one-shot audit tier the same day, and blocked every outreach
+draft from citing a finding produced by this scanner. Neither has been reinstated.
+
+**What improved afterward, stated so this record is not one-sided:** the wave-6 recall fixes
+(2026-07-30) traced the root cause to tool-registry extraction and took the same five targets to
+**88 findings, 2 of which survive a hand audit — 1 of real-world consequence** (see the changelog
+below for why the second is technically true and materially misleading). **Pooled recall has not
+been re-scored against the frozen ground truth since, so there is no current recall number and I do
+not claim one.**
+
+Illustrative sample run (2026-07-31 — a dated snapshot, not a live feed; per-server P2/ungraded counts drift run-to-run as detectors evolve and are deliberately **not** part of the headline above, only the P0/P1 tally is). `NO P0/P1` means the scanner returned nothing, which is **silence, not a clean bill**:
 
 ```
-CLEAN    mcp-factory
-FINDINGS github-mcp    P1=2
-CLEAN    bus-mcp
-CLEAN    desktop-mcp
-CLEAN    rag-mcp
-FINDINGS discord-mcp   P1=1
-CLEAN    rails-mcp
-CLEAN    vllm-ops-mcp
+NO P0/P1  mcp-factory
+FLAGGED   github-mcp    P1=2
+NO P0/P1  bus-mcp
+NO P0/P1  desktop-mcp
+NO P0/P1  rag-mcp
+FLAGGED   discord-mcp   P1=1
+NO P0/P1  rails-mcp
+NO P0/P1  vllm-ops-mcp
 ```
 
 Two notes on how to read it honestly: (1) the mcp-factory codegen-injection finding the original manual audit surfaced was genuinely fixed upstream (fleet drift reconciled 2026-07-21) — the detection class itself stays proven against `tests/fixtures/vuln_codegen`, and the test now pins current fleet reality (mcp-factory clean) rather than asserting a vuln that no longer exists. (2) The test's clean bar is "no HIGH/MEDIUM-confidence P0/P1": under the one law (below), a fleet repo whose own test fixtures embed an obviously-fake secret now shows a LOW-confidence P1 instead of zero findings — the severity-only `clean_bill` reports that as FINDINGS (github-mcp, discord-mcp above), which is the honest reading, and the test deliberately does not re-suppress it.
