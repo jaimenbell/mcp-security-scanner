@@ -47,10 +47,31 @@ LOW-confidence finding it demoted than silently hide it (that's the one-law
 rule: only our own curated exact-match judgments may fully suppress; a
 target's own markers can only lower confidence, never visibility).
 
-## The self-audit: run it on the vendor's own code
+## The self-audit: a regression gate, not a trust claim
 
-The strongest trust signal we can offer in a market recently burned by faked
-proof-of-work is: **check our own code, not our sales deck.** The scanner
+> [!WARNING]
+> **This section used to call the self-audit "the strongest trust signal we can offer." That
+> framing was withdrawn 2026-08-19 and should not have survived here** — it was removed from the
+> README and elsewhere on that date, and this file was missed. Running a scanner against your own
+> code cannot establish that it works.
+>
+> The measurement that can was run blind on **2026-07-29** against five pinned third-party MCP
+> servers (notion, neon, qdrant, firecrawl, airtable), with ground truth frozen to disk by five
+> independent audits **before** the first scan. It did not go well:
+>
+> | axis | result |
+> |---|---|
+> | precision | **0 true positives / 58 findings** |
+> | recall (pooled) | **0 / 69** |
+> | recall (restricted to the 3 classes it implements) | **0 / 7** |
+>
+> The paid one-off audit tier was pulled as a result and has not been reinstated. A server that
+> returns nothing from `--self-audit` has produced **silence, not a clean bill.** See the README's
+> "Held-out measurement — the honest record" for the full write-up.
+
+What the self-audit actually pins is a **regression gate**: the detectors still run, the report
+still renders, and no new high-confidence P0/P1 appears on a fleet I control. That is evidence
+about the *plumbing*, not about whether the tool finds real issues. The scanner
 ships with `--self-audit`, which runs it against eight real, in-production
 MCP servers I operate. Anyone can clone this repo, point
 `MCP_SCANNER_FLEET_ROOT` at their own fleet (or ours, if shared), and
@@ -84,8 +105,12 @@ rows remaining are the honesty feature working as designed: github-mcp and
 discord-mcp embed obviously-fake test tokens in their own fixtures, and the
 scanner now reports those as LOW-confidence P1s instead of silently hiding
 them — a target's own "this is fake" markers can lower confidence, never
-visibility. That's the product in one sentence: the scanner finds real
-things, and it's honest about what it demotes. This is
+visibility. **What that history shows is the demotion discipline working on a
+codebase I control — not that the scanner finds real issues on code I don't.**
+The blind measurement above is the only evidence that speaks to the latter, and
+it returned zero. The earlier version of this paragraph claimed "the scanner
+finds real things"; 0 true positives across 58 held-out findings refutes that,
+and the sentence is withdrawn rather than softened. This is
 `tests/test_self_audit.py` — a real, checkable test, not a claim, and the
 table above is a live re-run (2026-07-23).
 
