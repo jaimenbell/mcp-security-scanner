@@ -178,7 +178,7 @@ CI (`.github/workflows/ci.yml`) runs this suite on every push/PR and fails the
 build if this claimed count drifts from what the suite actually reports --
 see `scripts/check_readme_counts.py`.
 
-The self-audit tests (9 of the 771) require `MCP_SCANNER_FLEET_ROOT` to be set
+The self-audit tests (9 of the 784) require `MCP_SCANNER_FLEET_ROOT` to be set
 and pointed at real MCP server repos to scan; they skip cleanly if it's
 unset (e.g. in a fresh clone or CI on another machine). See
 [ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.

@@ -5,6 +5,24 @@ status: prototype-stage
 grounded_in: "2026-07-12 internal revenue-streams discovery"
 ---
 
+> [!danger] WITHDRAWN OFFER - DO NOT SEND, DO NOT QUOTE (withdrawn 2026-07-29; banner added 2026-08-20)
+> The paid audit tier this document sells ($250 / $450 / $750) was **withdrawn on 2026-07-29**,
+> after the scanner was measured **blind against pre-frozen ground truth** and returned
+> **0 true positives across 58 findings, and pooled recall of 0 of 69.**
+>
+> A clean result from a detector with 0/69 recall provably carries no information - silence is what
+> it returns on vulnerable code too. So the self-audit table, wherever this file leans on it, is not
+> evidence of efficacy and must not be cited as a trust signal.
+>
+> **The withdrawal did not reach every rail.** The tier was **relisted on Gumroad 2026-08-13** and
+> was still selling on **2026-08-20**; 24 outreach emails went out 2026-07-23 to 08-17, four of them
+> quoting these prices. A withdrawal is not finished until every surface that can take money for it
+> is closed.
+>
+> This file is kept as a record of what was offered, **not as a sellable artifact**. Do not fill it
+> in, do not send it, do not reuse its pricing. Outreach is halted.
+
+
 # MCP Security Scanning — service sketch
 
 > Revenue stream #2 from the 2026-07-12 revenue-streams discovery. This document sketches the offer; the sibling `README.md` is the working prototype it is built on.
@@ -16,14 +34,31 @@ The discovery research found a genuine, narrow gap:
 - **Nobody in the MCP-security space publishes transparent, self-serve, continuous-scanning pricing** — not even the funded players. Enkrypt AI ($2.35M seed, ran the widely-cited "33% of 1,000 MCP servers had critical vulns" study), Gopher Security, mcpscan.ai, and MCP Manager **all sales-gate their pricing.** Adjacent security-SaaS comps (Prowler, JFrog) sit in a **$99–149/mo** band a transparent entrant can match or undercut.
 - The buyer market is real and recently **burned by fake proof-of-work** (the Oura-Ring fake-GitHub-persona supply-chain incident). In that climate, a vendor who can *show* real, checkable, working MCP servers is a differentiator, not a marketing line.
 
-## The unfair advantage: the 6-server trust signal
+## ~~The unfair advantage: the 6-server trust signal~~ — REFUTED 2026-07-29, DO NOT USE
 
-The operator runs **six real, in-production MCP servers** (mcp-factory, github-mcp, bus-mcp, desktop-mcp, rag-mcp, discord-mcp). This scanner's `--self-audit` runs against all six and is checkable by any prospect:
+> **This section was the pitch's centrepiece and it does not survive measurement. Kept, struck
+> through, as the record — not as copy.**
+>
+> On 2026-07-29 the scanner was measured **blind against pre-frozen ground truth** on five pinned
+> third-party servers: **0 true positives across 58 findings, and pooled recall 0 of 69.** The paid
+> audit tier was withdrawn the same day.
+>
+> That result refutes the claim below directly. A self-audit cannot be a trust signal, because a
+> clean result from a detector with 0/69 recall **provably carries no information** — silence is
+> what it returns on vulnerable code too. The permitted framing is the measurement story itself
+> ("I built it, measured it blind, it scored 0/69, and I pulled the tier"), never the self-audit
+> table as evidence of efficacy.
+>
+> ⚠ The withdrawal was **not** propagated to every rail: the tier was relisted on Gumroad
+> 2026-08-13 and was still selling on 2026-08-20. A withdrawal is not finished until every surface
+> that can take money for it is closed.
 
-- It **flags** the one server an independent manual audit found vulnerable (mcp-factory's codegen-injection class).
-- It gives the **other five a clean bill.**
+~~The operator runs **six real, in-production MCP servers** (mcp-factory, github-mcp, bus-mcp, desktop-mcp, rag-mcp, discord-mcp). This scanner's `--self-audit` runs against all six and is checkable by any prospect:~~
 
-That is a live, reproducible demonstration that the tool finds real bugs *and* doesn't cry wolf — on the vendor's own code. Most competitors ask you to trust a sales deck; this ships the receipts.
+- ~~It **flags** the one server an independent manual audit found vulnerable (mcp-factory's codegen-injection class).~~
+- ~~It gives the **other five a clean bill.**~~
+
+~~That is a live, reproducible demonstration that the tool finds real bugs *and* doesn't cry wolf — on the vendor's own code. Most competitors ask you to trust a sales deck; this ships the receipts.~~
 
 ## What's honest about the pitch (and why that sells here)
 
@@ -64,4 +99,12 @@ This is **ranked #2** of the new angles and explicitly **sequenced *after* the r
 5. **Git-history secret scanning** — fold in gitleaks so the secret detector covers history, not just the working tree.
 6. **A curated rule set + suppression file** — so clients can baseline known-accepted findings.
 
-**Honest verdict:** this is a credible *prototype* and a genuine differentiator (the self-audit proof is real and reproducible), but it is a lead-gen + expert-triage tool today, not yet a standalone automated SaaS. The gap to "product" is precision (items 1–3) and delivery (item 4) — a scoped build, not a research problem.
+**Honest verdict — REWRITTEN 2026-08-20; the original is struck through below.** Measured blind
+against pre-frozen ground truth on 2026-07-29, this scanner returned **0 true positives across 58
+findings and pooled recall of 0 of 69.** It is not a credible prototype pending polish, and the gap
+to "product" is **not** precision-and-delivery — it is that the detectors did not find the seeded
+vulnerabilities at all. Treat everything below as a design sketch whose central premise was
+falsified, not as a roadmap. The one thing here that survived measurement is the honesty doctrine
+itself: it is what produced the blind test, and the blind test is what killed the pitch.
+
+~~**Honest verdict:** this is a credible *prototype* and a genuine differentiator (the self-audit proof is real and reproducible), but it is a lead-gen + expert-triage tool today, not yet a standalone automated SaaS. The gap to "product" is precision (items 1–3) and delivery (item 4) — a scoped build, not a research problem.~~

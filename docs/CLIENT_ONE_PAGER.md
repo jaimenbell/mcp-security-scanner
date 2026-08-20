@@ -7,6 +7,24 @@ source: "README.md, PRODUCT.md, mcp_scanner/client_report.py"
 tags: [mcp-security-scanner, sales-kit, one-pager]
 ---
 
+> [!danger] WITHDRAWN OFFER - DO NOT SEND, DO NOT QUOTE (withdrawn 2026-07-29; banner added 2026-08-20)
+> The paid audit tier this document sells ($250 / $450 / $750) was **withdrawn on 2026-07-29**,
+> after the scanner was measured **blind against pre-frozen ground truth** and returned
+> **0 true positives across 58 findings, and pooled recall of 0 of 69.**
+>
+> A clean result from a detector with 0/69 recall provably carries no information - silence is what
+> it returns on vulnerable code too. So the self-audit table, wherever this file leans on it, is not
+> evidence of efficacy and must not be cited as a trust signal.
+>
+> **The withdrawal did not reach every rail.** The tier was **relisted on Gumroad 2026-08-13** and
+> was still selling on **2026-08-20**; 24 outreach emails went out 2026-07-23 to 08-17, four of them
+> quoting these prices. A withdrawal is not finished until every surface that can take money for it
+> is closed.
+>
+> This file is kept as a record of what was offered, **not as a sellable artifact**. Do not fill it
+> in, do not send it, do not reuse its pricing. Outreach is halted.
+
+
 # MCP Security Scanner -- one-pager
 
 **Who this is for:** anyone building or shipping a Model Context Protocol
