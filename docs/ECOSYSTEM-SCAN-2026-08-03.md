@@ -271,15 +271,40 @@ exact file and the exact detector class our scanner still flags at HEAD:
 awslabs/mcp  src/dynamodb-mcp-server/.../cdk_generator/generator.py:48  codegen-injection  P1/medium
 ```
 
-We claim no credit for the discovery, and there was no coordination. We cite it as public record
-for one narrow reason: it is independent, third-party corroboration that the `codegen_injection`
-detector finds a real bug that a competent human reviewer independently judged worth fixing.
+We claim no credit for the discovery of the *fix*, and the PR was not prompted by us. We cite it as
+public record for one narrow reason: it is independent, third-party corroboration that the
+`codegen_injection` detector finds a real bug that a competent human reviewer independently judged
+worth fixing.
 
 `codegen_injection.py` is **byte-identical** between `15b5460` and `59c8fd3`
 (`git diff 15b5460 59c8fd3 -- mcp_scanner/detectors/codegen_injection.py` is empty). The detector
 that found the one true positive was not touched by any of the FP work.
 
-We have sent no disclosure and contacted no maintainer.
+> [!important] UPDATE 2026-09-08 — this section's original closing line said "We have sent no
+> disclosure and contacted no maintainer." **That is no longer true, and it was written on
+> 2026-08-03 when the PR was still open.** What has happened since, verified against the GitHub
+> API rather than recalled:
+>
+> - **PR [awslabs/mcp#4384](https://github.com/awslabs/mcp/pull/4384) merged 2026-08-13.**
+> - A coordinated disclosure followed, and the advisory is now public:
+>   **[GHSA-35jj-hwvm-792x](https://github.com/awslabs/mcp/security/advisories/GHSA-35jj-hwvm-792x)
+>   / CVE-2026-85654** — "Code injection in the CDK generator in Amazon
+>   awslabs.dynamodb-mcp-server", **High, CVSS 7.8**
+>   (`CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H`), published 2026-09-08T16:19:32Z.
+> - Affected `pip/awslabs.dynamodb-mcp-server` `>= 2.0.10, <= 2.1.5`; **patched in 2.1.6**.
+> - The advisory's credits list one entry: `jaimenbell`, type `coordinator`, state `accepted`.
+>
+> ⚠ Note the link above is the **repository-scoped** advisory URL. As of 2026-09-08 this advisory
+> is not yet mirrored into the global GitHub Advisory Database, so `github.com/advisories/GHSA-35jj-hwvm-792x`
+> returns 404. Cite the repo-scoped URL until that changes.
+>
+> **What this does and does not establish.** It does establish that this detector flagged a real
+> defect in third-party production code that was subsequently assigned a High-severity CVE. It
+> does **not** make the scanner the source of the fix — PR #4384 was independent and more complete
+> (9 interpolation sites against our 2). It does **not** move the recall picture: pooled recall
+> remains the dated 2026-07-29 measurement of 0/69 and has never been re-scored, and the wave-6
+> correction (88 findings, 2 surviving a hand audit, 1 of real-world consequence) travels with it.
+> One credited coordination is one credited coordination. It is not a track record.
 
 ---
 
