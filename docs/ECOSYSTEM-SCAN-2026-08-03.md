@@ -256,9 +256,9 @@ The 2026-07-23 report described a single genuinely reportable finding: a templat
 injection in a code-generation tool rendering a caller-influenced identifier into generated
 source with Jinja `autoescape` disabled. It was deliberately not attributed.
 
-It is public now, and not because of us. On 2026-07-31, **[awslabs/mcp#4384](https://github.com/awslabs/mcp/pull/4384)**
+It is public now. On 2026-07-31, **[awslabs/mcp#4384](https://github.com/awslabs/mcp/pull/4384)**
 — "fix(dynamodb-mcp-server): validate and escape names in CDK generator", opened by
-`LeeroyHannigan` — independently found and fixed the same issue, more completely than our draft
+`LeeroyHannigan` — fixed the same issue, more completely than our draft
 had: 9 interpolation sites against our 2, and it correctly separates identifier positions (which
 need charset validation) from string-literal positions (which `tojson` handles). The PR was open
 and unmerged as of 2026-08-03, at +476/−12 across 5 files.
@@ -271,21 +271,31 @@ exact file and the exact detector class our scanner still flags at HEAD:
 awslabs/mcp  src/dynamodb-mcp-server/.../cdk_generator/generator.py:48  codegen-injection  P1/medium
 ```
 
-We claim no credit for the discovery of the *fix*, and the PR was not prompted by us. We cite it as
-public record for one narrow reason: it is independent, third-party corroboration that the
-`codegen_injection` detector finds a real bug that a competent human reviewer independently judged
-worth fixing.
+We cite the PR as public record because a competent human reviewer judged the same code worth
+fixing. **What this paragraph originally assumed — that the PR was unrelated to us — is CORRECTED
+in the 2026-09-08 update below.** It was written with no knowledge of what AWS was doing with the
+report at the time.
 
 `codegen_injection.py` is **byte-identical** between `15b5460` and `59c8fd3`
 (`git diff 15b5460 59c8fd3 -- mcp_scanner/detectors/codegen_injection.py` is empty). The detector
 that found the one true positive was not touched by any of the FP work.
 
 > [!important] UPDATE 2026-09-08 — this section's original closing line said "We have sent no
-> disclosure and contacted no maintainer." **That is no longer true, and it was written on
-> 2026-08-03 when the PR was still open.** What has happened since, verified against the GitHub
-> API rather than recalled:
+> disclosure and contacted no maintainer." **That was not merely stale, it was WRONG ON THE DAY
+> IT WAS WRITTEN**: the report had gone to AWS eleven days earlier, on 2026-07-23, and AWS had
+> already acknowledged it. The record below is verified against the disclosure thread and the
+> GitHub API, not recalled:
 >
-> - **PR [awslabs/mcp#4384](https://github.com/awslabs/mcp/pull/4384) merged 2026-08-13.**
+> - **The finding was REPORTED TO AWS on 2026-07-23**, eight days before PR #4384 existed, by
+>   email to `aws-security@amazon.com`. AWS acknowledged it on 2026-07-24 ("we're currently
+>   investigating your report"), assigned an AWS Vulnerability Disclosure Program point of
+>   contact on 2026-08-13, and on 2026-09-03 wrote: *"this issue has been fixed. The fix shipped
+>   in awslabs.dynamodb-mcp-server v2.1.6 via PR #4384."*
+> - **PR [awslabs/mcp#4384](https://github.com/awslabs/mcp/pull/4384) merged 2026-08-13.** AWS
+>   describes it as the fix for the reported issue. Whether its author worked from that report or
+>   found the bug independently is AWS-internal and not visible to us, so it is claimed neither
+>   way here. What is documented is the report, its acknowledgement, and AWS's own statement of
+>   which release carried the fix.
 > - A coordinated disclosure followed, and the advisory is now public:
 >   **[GHSA-35jj-hwvm-792x](https://github.com/awslabs/mcp/security/advisories/GHSA-35jj-hwvm-792x)
 >   / CVE-2026-85654** — "Code injection in the CDK generator in Amazon
@@ -300,8 +310,9 @@ that found the one true positive was not touched by any of the FP work.
 >
 > **What this does and does not establish.** It does establish that this detector flagged a real
 > defect in third-party production code that was subsequently assigned a High-severity CVE. It
-> does **not** make the scanner the source of the fix — PR #4384 was independent and more complete
-> (9 interpolation sites against our 2). It does **not** move the recall picture: pooled recall
+> does **not** make the scanner the source of the PATCH — #4384 is more complete than the original
+> finding (9 interpolation sites against 2) and its authorship is not ours. It does **not** move
+> the recall picture: pooled recall
 > remains the dated 2026-07-29 measurement of 0/69 and has never been re-scored, and the wave-6
 > correction (88 findings, 2 surviving a hand audit, 1 of real-world consequence) travels with it.
 > One credited coordination is one credited coordination. It is not a track record.
