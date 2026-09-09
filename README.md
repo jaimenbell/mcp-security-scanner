@@ -126,7 +126,7 @@ scanner flagged a code-injection defect in `awslabs.dynamodb-mcp-server`. It was
 dated 0/69 and has never been re-scored; the scanner is also not the source of the patch, which is
 more complete than the original finding and is not ours. One credited coordination is one credited
 coordination, not a detection track record. Dates and evidence:
-[`docs/ECOSYSTEM-SCAN-2026-08-03.md`](docs/ECOSYSTEM-SCAN-2026-08-03.md).
+[`docs/ECOSYSTEM-SCAN-2026-08-03.md`](docs/ECOSYSTEM-SCAN-2026-08-03.md). Full write-up, which leads with the recall number and not the CVE: [I found a CVE with a scanner that misses almost everything](https://jaimenbell.dev/articles/cve-2026-85654-scanner-that-misses.html).
 
 Illustrative sample run (2026-07-31 — a dated snapshot, not a live feed; per-server P2/ungraded counts drift run-to-run as detectors evolve and are deliberately **not** part of the headline above, only the P0/P1 tally is). `NO P0/P1` means the scanner returned nothing, which is **silence, not a clean bill**:
 
