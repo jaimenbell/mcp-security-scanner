@@ -115,6 +115,19 @@ below for why the second is technically true and materially misleading). **Poole
 been re-scored against the frozen ground truth since, so there is no current recall number and I do
 not claim one.**
 
+**A separate population, stated separately: one credited CVE (2026-09-08).** Every number above is
+scoped to the five frozen targets and stays that way. Outside that corpus, a detector in this
+scanner flagged a code-injection defect in `awslabs.dynamodb-mcp-server`. It was reported to AWS on
+2026-07-23, acknowledged the next day, and is now published as
+[GHSA-35jj-hwvm-792x](https://github.com/awslabs/mcp/security/advisories/GHSA-35jj-hwvm-792x) /
+**CVE-2026-85654**, "Code injection in the CDK generator", **High, CVSS 7.8**, affecting
+`>= 2.0.10, <= 2.1.5` and patched in 2.1.6. The advisory credits `jaimenbell` as coordinator.
+**This does not move the benchmark above and is not folded into it.** Pooled recall remains the
+dated 0/69 and has never been re-scored; the scanner is also not the source of the patch, which is
+more complete than the original finding and is not ours. One credited coordination is one credited
+coordination, not a detection track record. Dates and evidence:
+[`docs/ECOSYSTEM-SCAN-2026-08-03.md`](docs/ECOSYSTEM-SCAN-2026-08-03.md).
+
 Illustrative sample run (2026-07-31 — a dated snapshot, not a live feed; per-server P2/ungraded counts drift run-to-run as detectors evolve and are deliberately **not** part of the headline above, only the P0/P1 tally is). `NO P0/P1` means the scanner returned nothing, which is **silence, not a clean bill**:
 
 ```
