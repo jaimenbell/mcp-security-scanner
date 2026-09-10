@@ -1,29 +1,39 @@
 """Regression pin for CVE-2026-85654 (GHSA-35jj-hwvm-792x, AWS as CNA).
 
 The codegen-injection detector flagged awslabs/mcp's dynamodb-mcp-server CDK
-generator (``cdk_generator/generator.py:48``) in the 2026-07-23 ecosystem scan
-(``ecoscan-artifacts/report-awslabs_mcp.md``, finding ``4daab31b00b0``). A human
-read of the flagged spot found that ``templates/stack.ts.j2`` interpolated
-caller-supplied table and attribute names raw into single-quoted TypeScript
-string literals. AWS reproduced it and fixed it in PR #4384 (merged 2026-08-13,
-v2.1.6): every slot became ``{{ x | tojson }}``.
+generator (``cdk_generator/generator.py:48``) in the 2026-07-23 ecosystem scan:
+finding ``4daab31b00b0``, recorded in ``docs/ECOSYSTEM-SCAN-2026-08-03-AUDIT-66.md``
+(file:line in ``docs/ECOSYSTEM-SCAN-2026-08-03.md``). A human read of the
+flagged spot found that ``templates/stack.ts.j2`` interpolated caller-supplied
+table and attribute names raw into single-quoted TypeScript string literals.
+AWS reproduced it and fixed it in PR #4384 (merged 2026-08-13, v2.1.6): the
+nine string-literal slots became ``{{ x | tojson }}``; identifier-position
+slots (the class name, camel/pascal-cased names, enum members) were covered by
+parse-time validation instead and stay bare.
 
 The fixtures are trimmed verbatim copies of the pre-fix (``cdd87a8``) and
-post-fix (``46ca139``) source, Apache-2.0. They pin three things:
+post-fix (``46ca139``) source. Apache-2.0; license and NOTICE in
+``tests/fixtures/third_party/awslabs-mcp/``. They pin three things:
 
-FIRES     the pre-fix shape produces exactly one P1 codegen-injection finding,
-          on the ``Environment(`` line the report quoted.
+FIRES     the pre-fix shape produces exactly one P1 codegen-injection finding
+          at detector level, on the ``Environment(`` line the report quoted.
 
-BOUNDARY  the post-fix shape produces the SAME finding. The fix changed the
-          template and left autoescape off -- which is correct for a code
-          template, as the detector's own docstring says. The detector flags
-          the surface (autoescape-off + a code-targeting template), not the
-          bug: the interpolation-level discriminator (``_JINJA_EXPR`` /
-          ``_SAFE_FILTERS`` / ``_expr_has_safe_filter``) is defined but not
-          called from ``run()``. If this test starts failing, the detector has
-          learned to tell the two apart -- update this test deliberately, and
+BOUNDARY  the post-fix shape produces the SAME detector-level finding. The fix
+          changed the template and left autoescape off -- correct for a code
+          template, as the detector's own docstring says. The detector's rule
+          is autoescape-off + a code-targeting template present; it flags the
+          surface, not the bug. The interpolation-level discriminator
+          (``_JINJA_EXPR`` / ``_SAFE_FILTERS`` / ``_expr_has_safe_filter``) is
+          defined but not called from ``run()``. In a full scan the grading
+          pass reports this finding UNGRADED (reachability and taint undecided),
+          so the P1 asserted here is the detector's grade, not the report's.
+          This is a characterization pin: if it starts failing, the detector
+          has learned to tell the two apart -- update it deliberately, and
           re-read the README's CVE paragraph, which must not claim more than
-          the detector does.
+          the detector does. Anyone wiring the discriminator: string-literal
+          position must be detected (identifier slots are legitimately bare),
+          and ``_expr_has_safe_filter``'s bare ``|e`` substring would score
+          ``| equalto`` as safe.
 
 SILENT    the hand-rolled-escape rule fires on neither shape; the AWS template
           never used ``replace(...)``. ``vuln_codegen`` trips both rules, so
@@ -48,6 +58,14 @@ def _template_text(fixtures_dir, name):
     return (fixtures_dir / name / "templates" / "stack.ts.j2").read_text(encoding="utf-8")
 
 
+def _body_after_header(path):
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    i = 0
+    while i < len(lines) and lines[i].startswith("#"):
+        i += 1
+    return "".join(lines[i:])
+
+
 def _assert_the_cve_finding(cg):
     assert len(cg) == 1, (
         "expected exactly the Environment finding, got "
@@ -69,7 +87,14 @@ def test_prefix_shape_is_the_vulnerable_template(fixtures_dir):
 def test_postfix_shape_is_the_fixed_template(fixtures_dir):
     t = _template_text(fixtures_dir, "cve_2026_85654_postfix")
     assert _RAW_SLOT not in t
-    assert t.count("| tojson") == 9, "PR #4384 escaped nine slots"
+    assert t.count("| tojson") == 9, "PR #4384 serialized nine string-literal slots"
+
+
+def test_prefix_and_postfix_generators_are_identical_after_header(fixtures_dir):
+    # The pair's premise is "same generator, different template". Keep it true.
+    a = _body_after_header(fixtures_dir / "cve_2026_85654_prefix" / "generator.py")
+    b = _body_after_header(fixtures_dir / "cve_2026_85654_postfix" / "generator.py")
+    assert a == b
 
 
 def test_prefix_shape_fires_p1(fixtures_dir):

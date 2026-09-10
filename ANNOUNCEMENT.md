@@ -57,7 +57,7 @@ target's own markers can only lower confidence, never visibility).
 >
 > The measurement that can was run blind on **2026-07-29** against five pinned third-party MCP
 > servers (notion, neon, qdrant, firecrawl, airtable), with ground truth from five independent
-> blind audits run **before** the first scan — audits whose per-item record was not retained, so
+> audits run **before** the first scan — audits whose per-item record was not retained, so
 > only the derived totals survive (noted 2026-09-09). It did not go well:
 >
 > | axis | result |
@@ -136,7 +136,7 @@ python -m mcp_scanner.cli --self-audit
 - **Not a SaaS.** It's a CLI you run locally or wire into CI
   (`--fail-on P1`). No hosted service exists today.
 
-784 tests total (`python -m pytest -q`) — 775 pass by default, 9 fleet
+790 tests total (`python -m pytest -q`) — 781 pass by default, 9 fleet
 self-audit tests skip without `MCP_SCANNER_FLEET_ROOT` set. Covers matched
 vuln/clean fixture pairs per detector, the self-audit proof above, the
 8-section client-report renderer, the `mcp-scan ecosystem-scan` v2 pipeline,

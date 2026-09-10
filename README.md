@@ -91,7 +91,7 @@ issues — the held-out measurement is the only thing that speaks to that.
 ### Held-out measurement — the honest record
 
 Measured blind on **2026-07-29** against five pinned third-party MCP servers (notion, neon, qdrant,
-firecrawl, airtable), with ground truth from five independent blind audits run **before** the
+firecrawl, airtable), with ground truth from five independent audits run **before** the
 first scan. The per-item record of those audits was not retained (found 2026-09-09;
 `ecoscan-targets.lock.json` already records that the 07-29 run kept no artifacts), so only the
 derived totals below survive:
@@ -101,6 +101,9 @@ derived totals below survive:
 | precision | **0 true positives / 58 findings** |
 | recall (pooled) | **0 / 69** |
 | recall (restricted to the 3 classes it implements) | **0 / 7** |
+
+_The two recall rows rest on the per-item record that was not retained: they are reported as
+recorded on 2026-07-29 and cannot be re-derived or audited from this repo._
 
 The best case was `mcp-server-qdrant` — every `.py` file loaded with full ASTs, every detector
 eligible — and it found **0 of 9**, including a path traversal a blind auditor reproduced live. On
@@ -114,8 +117,8 @@ draft from citing a finding produced by this scanner. Neither has been reinstate
 (2026-07-30) traced the root cause to tool-registry extraction and took the same five targets to
 **88 findings, 2 of which survive a hand audit — 1 of real-world consequence** (see the changelog
 below for why the second is technically true and materially misleading). **Pooled recall has not
-been re-scored against the frozen ground truth since, so there is no current recall number and I do
-not claim one.**
+been re-scored since — the per-item record a re-score would need was not retained (see above) — so
+there is no current recall number and I do not claim one.**
 
 **A separate population, stated separately: one credited CVE (2026-09-08).** Every number above is
 scoped to the five frozen targets and stays that way. Outside that corpus, a detector in this
@@ -186,14 +189,14 @@ Two notes on how to read it honestly: (1) the mcp-factory codegen-injection find
 ## Tests
 
 ```bash
-python -m pytest -q     # 784 tests (775 passing, 9 self-audit skip without the env var below); the no-crypto figure previously carried here (403 passing / 11 skipped) is STALE as of the 2026-07-29 grading-honesty wave and has NOT been re-measured -- treat it as unknown until someone runs a genuinely clean venv without cryptography, rather than trusting the carried-forward number: per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix (incl. the cli-only/uncalled decidable-reachability grades + the low-level MCP SDK Server()/list_tools/call_tool discovery shape, per-module-scoped and import-provenance-gated so a repo with more than one dispatcher, or a same-named non-MCP class, can't claim a bogus root, and an un-rooted low-level tool -- split declaration/dispatch modules, or a genuinely ambiguous multi-dispatcher file -- withholds CLI_ONLY/UNCALLED in favor of UNKNOWN the same way unresolvable dynamic dispatch does) + detector 5 (tool-scope-creep) and detector 6 (secret-leak-via-tool-response) low-level-SDK dispatch-branch attribution (2026-07-23: `tool_registry.dispatch_segments`, shared by both detectors) + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof (now guarding 6 fleet servers directly, 8 total via FLEET_SERVERS) + client-report renderer + the CI README count-verification gate's own unit tests + wave-1 FP-class regression fixtures (pagination-cursor names, self-signed test certs, known-placeholder secrets, RegExp-vs-child_process .exec() receiver resolution) + the test-path confidence demotion (wave-4: pair-only, never demotes a real value-shaped secret on a bare path) + the `mcp-scan report` client-report generator (2026-07-23: stable line-independent finding_id + collision suffixes, scan_meta embedding, triage.toml verdict joins incl. the unknown-id loud-warning path, byte-stable golden HTML/MD renders, the zero-external-URL self-containment gate, and the no-hardcoded-counts template AST-grep gate) + the `mcp-scan ecosystem-scan` repeatable v2 pipeline (2026-07-23: batch-scan a fleet of MCP-server repos read-only -- mtime/bytes unchanged on every target, clone path injected/mocked so the suite makes zero real network calls, above-LOW findings gated fail-closed as disclosure candidates, PRIVATE-marked disclosure notes that surface only the target's own SECURITY.md and never invent a contact channel or auto-publish, anonymized aggregate + notes staged to gitignored local dirs, and a runtime-unique sentinel in the leak test so no fixture string can coincidentally match real output) + the destructive-action confirm-gate detector's FP-wave2 hardening (2026-07-23: recognizes a real in-body control-flow confirmation gate -- a negated force/yes/confirm/proceed param bound to an actual throw/exit/raise -- as equivalent to the SDK's -Confirm/--dry-run flag, conservative-by-design so a bare param reference alone never suppresses; an adjudication pass then removed an overly loose bare-phrase alternation with zero binding to any real gate; and the destructiveHint annotation doctrine -- a target's self-declared destructiveHint:true is recorded as context only and never suppresses or downgrades a genuine finding)
+python -m pytest -q     # 790 tests (781 passing, 9 self-audit skip without the env var below); the no-crypto figure previously carried here (403 passing / 11 skipped) is STALE as of the 2026-07-29 grading-honesty wave and has NOT been re-measured -- treat it as unknown until someone runs a genuinely clean venv without cryptography, rather than trusting the carried-forward number: per-detector vuln/clean fixtures (Python + JS/TS parity across .js/.mjs/.cjs/.ts/.mts/.cts/.jsx/.tsx) + the reachability-grading matrix (incl. the cli-only/uncalled decidable-reachability grades + the low-level MCP SDK Server()/list_tools/call_tool discovery shape, per-module-scoped and import-provenance-gated so a repo with more than one dispatcher, or a same-named non-MCP class, can't claim a bogus root, and an un-rooted low-level tool -- split declaration/dispatch modules, or a genuinely ambiguous multi-dispatcher file -- withholds CLI_ONLY/UNCALLED in favor of UNKNOWN the same way unresolvable dynamic dispatch does) + detector 5 (tool-scope-creep) and detector 6 (secret-leak-via-tool-response) low-level-SDK dispatch-branch attribution (2026-07-23: `tool_registry.dispatch_segments`, shared by both detectors) + the tool-parameter taint-tracking matrix (intra-file + cross-file, up to two hops) + the self-audit proof (now guarding 6 fleet servers directly, 8 total via FLEET_SERVERS) + client-report renderer + the CI README count-verification gate's own unit tests + wave-1 FP-class regression fixtures (pagination-cursor names, self-signed test certs, known-placeholder secrets, RegExp-vs-child_process .exec() receiver resolution) + the test-path confidence demotion (wave-4: pair-only, never demotes a real value-shaped secret on a bare path) + the `mcp-scan report` client-report generator (2026-07-23: stable line-independent finding_id + collision suffixes, scan_meta embedding, triage.toml verdict joins incl. the unknown-id loud-warning path, byte-stable golden HTML/MD renders, the zero-external-URL self-containment gate, and the no-hardcoded-counts template AST-grep gate) + the `mcp-scan ecosystem-scan` repeatable v2 pipeline (2026-07-23: batch-scan a fleet of MCP-server repos read-only -- mtime/bytes unchanged on every target, clone path injected/mocked so the suite makes zero real network calls, above-LOW findings gated fail-closed as disclosure candidates, PRIVATE-marked disclosure notes that surface only the target's own SECURITY.md and never invent a contact channel or auto-publish, anonymized aggregate + notes staged to gitignored local dirs, and a runtime-unique sentinel in the leak test so no fixture string can coincidentally match real output) + the destructive-action confirm-gate detector's FP-wave2 hardening (2026-07-23: recognizes a real in-body control-flow confirmation gate -- a negated force/yes/confirm/proceed param bound to an actual throw/exit/raise -- as equivalent to the SDK's -Confirm/--dry-run flag, conservative-by-design so a bare param reference alone never suppresses; an adjudication pass then removed an overly loose bare-phrase alternation with zero binding to any real gate; and the destructiveHint annotation doctrine -- a target's self-declared destructiveHint:true is recorded as context only and never suppresses or downgrades a genuine finding)
 ```
 
 CI (`.github/workflows/ci.yml`) runs this suite on every push/PR and fails the
 build if this claimed count drifts from what the suite actually reports --
 see `scripts/check_readme_counts.py`.
 
-The self-audit tests (9 of the 784) require `MCP_SCANNER_FLEET_ROOT` to be set
+The self-audit tests (9 of the 790) require `MCP_SCANNER_FLEET_ROOT` to be set
 and pointed at real MCP server repos to scan; they skip cleanly if it's
 unset (e.g. in a fresh clone or CI on another machine). See
 [ANNOUNCEMENT.md](ANNOUNCEMENT.md) for the reproducible self-audit output.
@@ -208,3 +211,12 @@ reviews, managed scanning, or custom detector work, see
 
 Building your own MCP server? The [MCP Starter Kit](https://jaimenbell.gumroad.com/l/adnojp)
 has templates, a build playbook, and packaging war-stories from shipping this one.
+
+## Third-party test fixtures
+
+`tests/fixtures/cve_2026_85654_prefix/` and `tests/fixtures/cve_2026_85654_postfix/` are trimmed
+copies of `awslabs/mcp`'s `dynamodb-mcp-server` CDK generator at the commits before and after the
+CVE-2026-85654 fix, under the Apache License 2.0. The upstream LICENSE and NOTICE are in
+`tests/fixtures/third_party/awslabs-mcp/`; each fixture file's header states its trims. Nothing under
+`tests/` ships in the PyPI wheel (`[tool.setuptools.packages.find] include = ["mcp_scanner*"]`), so
+the distributed package remains MIT.

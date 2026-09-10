@@ -1,10 +1,12 @@
 # Trimmed verbatim from awslabs/mcp @ 46ca139f27020e1b54b549d136138c6dc3ac84e2 -- the merge of
 # PR #4384 (2026-08-13, dynamodb-mcp-server v2.1.6), i.e. the FIXED shape for CVE-2026-85654.
 # Path: src/dynamodb-mcp-server/awslabs/dynamodb_mcp_server/cdk_generator/generator.py
-# Copyright Amazon.com, Inc. or its affiliates. Apache License, Version 2.0.
+# Copyright Amazon.com, Inc. or its affiliates. Apache License, Version 2.0 -- full text and
+# NOTICE in tests/fixtures/third_party/awslabs-mcp/. Modified (trimmed) per section 4(b).
 # The fix did NOT touch the Environment(...) call: autoescape stays off, which is correct for
-# a code template. It escaped the interpolations in templates/stack.ts.j2 and added
-# identifier validation in _to_camel_case (elided here). Same trims as the prefix fixture.
+# a code template. It serialized the nine string-literal slots in templates/stack.ts.j2 with
+# `| tojson` and covered identifier-position slots with parse-time validation in
+# _to_camel_case (elided here). Same trims as the prefix fixture; body identical by test.
 """CDK project generator for DynamoDB data models."""
 
 from jinja2 import Environment, FileSystemLoader

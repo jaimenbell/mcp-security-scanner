@@ -1,10 +1,11 @@
 # Trimmed verbatim from awslabs/mcp @ cdd87a8e28cff01da21387cb7ff444d8d2ffedb4 -- the
 # parent of the fix merge, i.e. the VULNERABLE shape behind CVE-2026-85654 / GHSA-35jj-hwvm-792x.
 # Path: src/dynamodb-mcp-server/awslabs/dynamodb_mcp_server/cdk_generator/generator.py
-# Copyright Amazon.com, Inc. or its affiliates. Apache License, Version 2.0.
+# Copyright Amazon.com, Inc. or its affiliates. Apache License, Version 2.0 -- full text and
+# NOTICE in tests/fixtures/third_party/awslabs-mcp/. Modified (trimmed) per section 4(b).
 # Trims: license header, unrelated imports/methods, and the case-helper bodies. The
-# Environment(...) call is byte-for-byte the line the scanner flagged
-# (ecoscan-artifacts/report-awslabs_mcp.md, finding 4daab31b00b0).
+# Environment(...) call is byte-for-byte the line the scanner flagged: finding 4daab31b00b0 in
+# docs/ECOSYSTEM-SCAN-2026-08-03-AUDIT-66.md (file:line in docs/ECOSYSTEM-SCAN-2026-08-03.md).
 """CDK project generator for DynamoDB data models."""
 
 from jinja2 import Environment, FileSystemLoader

@@ -10,7 +10,8 @@ tags: [mcp-security-scanner, sow, template, one-shot-audit]
 
 > [!danger] WITHDRAWN OFFER - DO NOT SEND, DO NOT QUOTE (withdrawn 2026-07-29; banner added 2026-08-20)
 > The paid audit tier this document sells ($250 / $450 / $750) was **withdrawn on 2026-07-29**,
-> after the scanner was measured **blind against pre-frozen ground truth** and returned
+> after the scanner was measured **blind against ground truth fixed before the scan** (per-item
+> record not retained; see the README) and returned
 > **0 true positives across 58 findings, and pooled recall of 0 of 69.**
 >
 > A clean result from a detector with 0/69 recall provably carries no information - silence is what

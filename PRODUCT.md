@@ -7,7 +7,8 @@ grounded_in: "2026-07-12 internal revenue-streams discovery"
 
 > [!danger] WITHDRAWN OFFER - DO NOT SEND, DO NOT QUOTE (withdrawn 2026-07-29; banner added 2026-08-20)
 > The paid audit tier this document sells ($250 / $450 / $750) was **withdrawn on 2026-07-29**,
-> after the scanner was measured **blind against pre-frozen ground truth** and returned
+> after the scanner was measured **blind against ground truth fixed before the scan** (per-item
+> record not retained; see the README) and returned
 > **0 true positives across 58 findings, and pooled recall of 0 of 69.**
 >
 > A clean result from a detector with 0/69 recall provably carries no information - silence is what
@@ -39,7 +40,8 @@ The discovery research found a genuine, narrow gap:
 > **This section was the pitch's centrepiece and it does not survive measurement. Kept, struck
 > through, as the record — not as copy.**
 >
-> On 2026-07-29 the scanner was measured **blind against pre-frozen ground truth** on five pinned
+> On 2026-07-29 the scanner was measured **blind against ground truth fixed before the scan**
+> (per-item record not retained; see the README) on five pinned
 > third-party servers: **0 true positives across 58 findings, and pooled recall 0 of 69.** The paid
 > audit tier was withdrawn the same day.
 >
@@ -100,7 +102,8 @@ This is **ranked #2** of the new angles and explicitly **sequenced *after* the r
 6. **A curated rule set + suppression file** — so clients can baseline known-accepted findings.
 
 **Honest verdict — REWRITTEN 2026-08-20; the original is struck through below.** Measured blind
-against pre-frozen ground truth on 2026-07-29, this scanner returned **0 true positives across 58
+against ground truth fixed before the scan (per-item record not retained; see the README) on
+2026-07-29, this scanner returned **0 true positives across 58
 findings and pooled recall of 0 of 69.** It is not a credible prototype pending polish, and the gap
 to "product" is **not** precision-and-delivery — it is that the detectors did not find the seeded
 vulnerabilities at all. Treat everything below as a design sketch whose central premise was
