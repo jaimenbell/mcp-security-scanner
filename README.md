@@ -91,8 +91,10 @@ issues — the held-out measurement is the only thing that speaks to that.
 ### Held-out measurement — the honest record
 
 Measured blind on **2026-07-29** against five pinned third-party MCP servers (notion, neon, qdrant,
-firecrawl, airtable), with ground truth frozen to disk by five independent audits **before** the
-first scan:
+firecrawl, airtable), with ground truth from five independent blind audits run **before** the
+first scan. The per-item record of those audits was not retained (found 2026-09-09;
+`ecoscan-targets.lock.json` already records that the 07-29 run kept no artifacts), so only the
+derived totals below survive:
 
 | axis | result |
 |---|---|

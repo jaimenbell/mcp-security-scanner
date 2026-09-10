@@ -56,8 +56,9 @@ target's own markers can only lower confidence, never visibility).
 > code cannot establish that it works.
 >
 > The measurement that can was run blind on **2026-07-29** against five pinned third-party MCP
-> servers (notion, neon, qdrant, firecrawl, airtable), with ground truth frozen to disk by five
-> independent audits **before** the first scan. It did not go well:
+> servers (notion, neon, qdrant, firecrawl, airtable), with ground truth from five independent
+> blind audits run **before** the first scan — audits whose per-item record was not retained, so
+> only the derived totals survive (noted 2026-09-09). It did not go well:
 >
 > | axis | result |
 > |---|---|
